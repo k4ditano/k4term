@@ -2730,9 +2730,10 @@ impl Element for TerminalTextElement {
         );
 
         window.paint_layer(bounds, |window| {
-            let default_bg = { self.view.read(cx).session.default_background() };
-            window.paint_quad(fill(bounds, hsla_from_rgb(default_bg)));
-
+            //  El fondo NO se pinta aquí. Lo pone la lámina de arriba, que es
+            //  la que sabe de opacidad y de esquinas; tapar el hueco con un
+            //  rectángulo opaco y cuadrado —que es lo que se hacía— se comía
+            //  el cristal y el redondeo y dejaba el color solo en el borde.
             for quad in prepaint.background_quads.drain(..) {
                 window.paint_quad(quad);
             }
@@ -2856,11 +2857,16 @@ impl Render for TerminalView {
             .pr(self.padding + px(6.))
             .whitespace_nowrap()
             .relative()
-            //  Esquinas de la casa y un filo de un píxel: el truco de macOS
-            //  para que una ventana negra no se funda con un fondo oscuro.
-            .rounded(px(self.radio))
-            .border_1()
-            .border_color(hsla(0., 0., 1.0, 0.08))
+            //  Esquinas y filo propios SOLO si se piden. En un compositor que
+            //  ya redondea y ya pone borde —Hyprland, sin ir más lejos— poner
+            //  los nuestros encima deja dos curvas que no casan; ahí lo que
+            //  se quiere es que la lámina llegue hasta el filo y que recorte
+            //  el de fuera.
+            .when(self.radio > 0., |d| {
+                d.rounded(px(self.radio))
+                    .border_1()
+                    .border_color(hsla(0., 0., 1.0, 0.08))
+            })
             .child(TerminalTextElement { view: cx.entity() })
             //  Un punto ámbar arriba a la derecha cuando el depósito de la
             //  barra está seco. Nada más: quien lo sepa, lo sabe.

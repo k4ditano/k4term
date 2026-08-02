@@ -42,7 +42,9 @@ impl Default for Ajustes {
             //  De fábrica, cristal suave y las esquinas de la isla: es la
             //  cara de la casa, y quien no la quiera pone opacidad = 1.
             opacidad: 0.94,
-            radio: 16.0,
+            //  Cero: que redondee el compositor, que en Hyprland ya lo hace y
+            //  con el radio que el usuario tenga puesto en su tema.
+            radio: 0.0,
             tranquilo: false,
         }
     }
