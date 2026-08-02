@@ -16,9 +16,36 @@ pub enum Aviso {
     Acaba { salida: i32 },
 }
 
+//  Lo que el reloj decide contar, ya con los segundos hechos. Quien lo recibe
+//  elige cómo se cuenta: la ventana lo manda por el IPC de la barra y la
+//  sesión de la isla lo escribe en su salida, que es el canal que ya tiene.
+pub enum Parte {
+    Empezado { mandato: String, segundos: u64 },
+    Acabado {
+        mandato: String,
+        salida: i32,
+        segundos: u64,
+    },
+}
+
 //  Un hilo por ventana. Devuelve por dónde hablarle; cuando el emisor se
 //  cierra, el hilo se acaba solo.
 pub fn notificador(pid: u32) -> Sender<Aviso> {
+    notificador_con(move |parte| match parte {
+        Parte::Empezado { mandato, segundos } => barra::avisar_inicio(pid, &mandato, segundos),
+        Parte::Acabado {
+            mandato,
+            salida,
+            segundos,
+        } => barra::avisar_fin(pid, &mandato, salida, segundos),
+    })
+}
+
+//  El mismo reloj, contándoselo a quien tú digas. Está separado porque la
+//  decisión —«solo si cruza el umbral estando vivo»— es lo que tiene valor y
+//  no queremos dos copias que se separen: la de la ventana y la de la isla
+//  tienen que comportarse igual.
+pub fn notificador_con(contar: impl Fn(Parte) + Send + 'static) -> Sender<Aviso> {
     let (tx, rx) = channel::<Aviso>();
     let umbral = barra::umbral_pildora();
 
@@ -41,14 +68,21 @@ pub fn notificador(pid: u32) -> Sender<Aviso> {
                 Ok(Aviso::Acaba { salida }) => {
                     if let Some((mandato, desde, anunciado)) = curso.take() {
                         if anunciado {
-                            barra::avisar_fin(pid, &mandato, salida, desde.elapsed().as_secs());
+                            contar(Parte::Acabado {
+                                mandato,
+                                salida,
+                                segundos: desde.elapsed().as_secs(),
+                            });
                         }
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     if let Some((mandato, desde, anunciado)) = &mut curso {
                         if !*anunciado {
-                            barra::avisar_inicio(pid, mandato, desde.elapsed().as_secs());
+                            contar(Parte::Empezado {
+                                mandato: mandato.clone(),
+                                segundos: desde.elapsed().as_secs(),
+                            });
                             *anunciado = true;
                         }
                     }

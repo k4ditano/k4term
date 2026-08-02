@@ -37,7 +37,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ghostty_vt::{KeyModifiers, Rgb, Terminal, encode_key_named};
-use k4term_puente::tema;
+use k4term_puente::{Aviso, Suceso, osc::Escaner, tema, trabajos};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +84,30 @@ enum Recado {
     Donde,
     Rueda { lineas: i32 },
     Ajustes(Box<k4term_puente::Ajustes>),
+}
+
+//  Lo que se está cociendo aquí dentro, y quién te llama.
+//
+//  Va por la salida estándar y no por el IPC de la barra —que es lo que hace
+//  la ventana— porque esta sesión YA tiene un canal abierto con ella. Y de
+//  paso resuelve lo que el IPC no podía: la barra sabe de QUÉ sesión viene,
+//  así que pulsar el indicador puede traerte a esta terminal y no a una
+//  ventana que no existe.
+#[derive(Serialize)]
+struct Trabajo {
+    que: &'static str,
+    estado: &'static str,
+    mandato: String,
+    salida: i32,
+    segundos: u64,
+}
+
+//  Alguien ha tocado la campana. Si eso merece aviso lo decide la barra, que
+//  es la única que sabe si estás mirando esta terminal ahora mismo.
+#[derive(Serialize)]
+struct Campana {
+    que: &'static str,
+    titulo: String,
 }
 
 #[derive(Serialize)]
@@ -240,6 +264,17 @@ fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str, cwd: String) -> Ma
         cwd,
         titulo,
         scroll: [arriba, total.max(u32::from(filas))],
+    }
+}
+
+//  Una línea suelta por la salida. El motor también escribe ahí, pero cada
+//  uno toma el cerrojo para su línea entera, así que no se entrelazan.
+fn decir<T: Serialize>(cosa: &T) {
+    if let Ok(json) = serde_json::to_string(cosa) {
+        let salida = std::io::stdout();
+        let mut s = salida.lock();
+        let _ = writeln!(s, "{}", json);
+        let _ = s.flush();
     }
 }
 
@@ -441,15 +476,62 @@ fn main() {
     }
 
     // ── el PTY habla ──────────────────────────────────────────────
+    //
+    //  Y de paso se escucha lo que la shell cuenta de sí misma. Los marcadores
+    //  se leen del chorro ANTES de llegar al VT, igual que en la ventana: el
+    //  API C de ghostty no los expone y no hace falta que lo haga.
     {
         let tx: Sender<Recado> = tx.clone();
         thread::spawn(move || {
+            let avisos = trabajos::notificador_con(|parte| match parte {
+                trabajos::Parte::Empezado { mandato, segundos } => decir(&Trabajo {
+                    que: "trabajo",
+                    estado: "empieza",
+                    mandato,
+                    salida: 0,
+                    segundos,
+                }),
+                trabajos::Parte::Acabado {
+                    mandato,
+                    salida,
+                    segundos,
+                } => decir(&Trabajo {
+                    que: "trabajo",
+                    estado: "acaba",
+                    mandato,
+                    salida,
+                    segundos,
+                }),
+            });
+
+            let mut escaner = Escaner::new();
+            let mut mandato = String::new();
             let mut buf = [0u8; 8192];
             loop {
                 let n = match lector.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => n,
                 };
+
+                for suceso in escaner.tragar(&buf[..n]) {
+                    match suceso {
+                        Suceso::Mandato(m) => mandato = m,
+                        Suceso::Comienza => {
+                            let _ = avisos.send(Aviso::Empieza {
+                                mandato: std::mem::take(&mut mandato),
+                            });
+                        }
+                        Suceso::Termina { salida } => {
+                            let _ = avisos.send(Aviso::Acaba { salida });
+                        }
+                        Suceso::Campana => decir(&Campana {
+                            que: "campana",
+                            titulo: mandato.clone(),
+                        }),
+                        Suceso::Directorio(_) => {}
+                    }
+                }
+
                 if tx.send(Recado::Bytes(buf[..n].to_vec())).is_err() {
                     break;
                 }
