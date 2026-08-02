@@ -16,17 +16,18 @@ pub fn shell_qml() -> PathBuf {
     PathBuf::from(home).join(".config/quickshell/k4/shell.qml")
 }
 
-//  Cuánto tiene que durar un mandato para merecer un aviso. Por debajo de
-//  esto no se avisa: quien lanza algo de tres segundos sigue mirando.
-pub fn umbral_aviso() -> Duration {
-    let segundos = std::env::var("K4TERM_AVISO_SEGUNDOS")
+//  Cuánto tiene que llevar corriendo un mandato para que la barra se entere.
+//  Por debajo de esto no se dice nada: quien lanza un `ls` no necesita que la
+//  isla se lo cuente, y así tampoco pagamos un proceso por cada orden.
+pub fn umbral_pildora() -> Duration {
+    let segundos = std::env::var("K4TERM_PILDORA_SEGUNDOS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(20);
+        .unwrap_or(3);
     Duration::from_secs(segundos)
 }
 
-pub fn avisar_trabajo(mandato: &str, salida: i32, segundos: u64) {
+fn llamar(argumentos: &[&str]) {
     let qml = shell_qml();
     if !qml.exists() {
         return;
@@ -35,16 +36,38 @@ pub fn avisar_trabajo(mandato: &str, salida: i32, segundos: u64) {
     let _ = Command::new("quickshell")
         .args(["ipc", "-p"])
         .arg(&qml)
-        .args([
-            "call",
-            "k4.term",
-            "trabajo",
-            mandato,
-            &salida.to_string(),
-            &segundos.to_string(),
-        ])
+        .args(["call", "k4.term"])
+        .args(argumentos)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
+}
+
+//  Los segundos que YA lleva: la barra se entera tarde a propósito (hasta que
+//  cruza el umbral), y sin este dato su reloj arrancaría en cero y contaría
+//  menos de lo que el mandato lleva de verdad.
+pub fn avisar_inicio(pid: u32, mandato: &str, segundos: u64) {
+    llamar(&[
+        "inicio",
+        &pid.to_string(),
+        mandato,
+        &segundos.to_string(),
+    ]);
+}
+
+pub fn avisar_fin(pid: u32, mandato: &str, salida: i32, segundos: u64) {
+    llamar(&[
+        "fin",
+        &pid.to_string(),
+        mandato,
+        &salida.to_string(),
+        &segundos.to_string(),
+    ]);
+}
+
+//  Al cerrar la ventana: lo que estuviera en marcha se va con ella, y la
+//  barra no tiene por qué quedarse con un indicador de un muerto.
+pub fn limpiar(pid: u32) {
+    llamar(&["limpiar", &pid.to_string()]);
 }

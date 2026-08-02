@@ -20,12 +20,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{App, AppContext, Application, KeyBinding, TitlebarOptions, WindowOptions};
 use gpui_ghostty_terminal::view::{Copy, Paste, SelectAll, TerminalInput, TerminalView};
 use gpui_ghostty_terminal::{Rgb, TerminalConfig, TerminalSession};
-use k4term_puente::{Suceso, barra, osc::Escaner, tema};
+use k4term_puente::{Aviso, Suceso, barra, osc::Escaner, tema, trabajos};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 fn fuente_de_la_casa() -> gpui::Font {
@@ -162,6 +162,9 @@ fn main() {
 
             thread::spawn(move || {
                 let _ = child.wait();
+                // Lo que estuviera corriendo se va con la ventana: que la
+                // barra no se quede con el indicador de un muerto.
+                barra::limpiar(std::process::id());
                 // Muere la shell (o el mandato de -e), muere la ventana: el
                 // contrato de toda terminal.
                 std::process::exit(0);
@@ -197,12 +200,11 @@ fn main() {
             //  El lector es también quien vigila los marcadores de la shell:
             //  los bytes pasan por aquí antes de llegar al terminal, así que
             //  se miran al vuelo y siguen intactos.
+            let avisos = trabajos::notificador(std::process::id());
             thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 let mut escaner = Escaner::new();
-                let umbral = barra::umbral_aviso();
                 let mut mandato = String::new();
-                let mut arranque: Option<Instant> = None;
 
                 loop {
                     let n = match pty_reader.read(&mut buf) {
@@ -214,18 +216,18 @@ fn main() {
                     for suceso in escaner.tragar(&buf[..n]) {
                         match suceso {
                             Suceso::Mandato(m) => mandato = m,
-                            Suceso::Comienza => arranque = Some(Instant::now()),
-                            Suceso::Termina { salida } => {
-                                if let Some(t0) = arranque.take() {
-                                    let duracion = t0.elapsed();
-                                    if duracion >= umbral && !mandato.trim().is_empty() {
-                                        barra::avisar_trabajo(
-                                            mandato.trim(),
-                                            salida,
-                                            duracion.as_secs(),
-                                        );
-                                    }
+                            Suceso::Comienza => {
+                                //  Sin integración de shell no hay nombre, y
+                                //  un indicador que no dice qué corre no vale
+                                //  para nada: mejor callarse.
+                                if !mandato.trim().is_empty() {
+                                    let _ = avisos.send(Aviso::Empieza {
+                                        mandato: mandato.trim().to_string(),
+                                    });
                                 }
+                            }
+                            Suceso::Termina { salida } => {
+                                let _ = avisos.send(Aviso::Acaba { salida });
                                 mandato.clear();
                             }
                             // El directorio se sigue ya, pero todavía no lo

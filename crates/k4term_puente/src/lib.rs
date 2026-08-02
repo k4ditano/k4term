@@ -9,6 +9,8 @@
 pub mod barra;
 pub mod osc;
 pub mod tema;
+pub mod trabajos;
 
 pub use osc::{Escaner, Suceso};
 pub use tema::Tema;
+pub use trabajos::Aviso;
