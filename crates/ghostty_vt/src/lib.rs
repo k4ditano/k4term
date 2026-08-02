@@ -158,6 +158,21 @@ impl Terminal {
         salida
     }
 
+    //  El título que ha pedido la aplicación de dentro (OSC 0/2). `None` si
+    //  no ha pedido ninguno. Es lo único que distingue de un vistazo una
+    //  sesión de otra: sin esto, un selector de terminales solo puede decir
+    //  «terminal 1, terminal 2».
+    pub fn title(&self) -> Option<String> {
+        let bytes = unsafe { ghostty_vt_sys::ghostty_vt_terminal_title(self.ptr.as_ptr()) };
+        if bytes.ptr.is_null() {
+            return None;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(bytes.ptr, bytes.len) };
+        let s = String::from_utf8_lossy(slice).into_owned();
+        unsafe { ghostty_vt_sys::ghostty_vt_bytes_free(bytes) };
+        Some(s)
+    }
+
     pub fn dump_viewport(&self) -> Result<String, Error> {
         let bytes = unsafe { ghostty_vt_sys::ghostty_vt_terminal_dump_viewport(self.ptr.as_ptr()) };
         if bytes.ptr.is_null() {

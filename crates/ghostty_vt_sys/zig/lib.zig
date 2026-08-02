@@ -22,6 +22,10 @@ const TerminalHandle = struct {
     stream: terminal.Stream(*Handler),
     handler: Handler,
     respuestas: Respuestas,
+    //  El título que la aplicación de dentro haya pedido (OSC 0/2). Es lo
+    //  único que distingue una sesión de otra cuando hay varias abiertas: sin
+    //  esto, un selector solo puede decir «terminal 1, terminal 2».
+    titulo: std.ArrayList(u8),
     default_fg: terminal.color.RGB,
     default_bg: terminal.color.RGB,
     viewport_top_y_screen: u32,
@@ -43,9 +47,10 @@ const TerminalHandle = struct {
         handle.* = .{
             .alloc = alloc,
             .terminal = t,
-            .handler = .{ .terminal = undefined, .respuestas = undefined },
+            .handler = .{ .terminal = undefined, .respuestas = undefined, .titulo = undefined },
             .stream = undefined,
             .respuestas = Respuestas.init(alloc),
+            .titulo = std.ArrayList(u8).init(alloc),
             .default_fg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
             .default_bg = .{ .r = 0x00, .g = 0x00, .b = 0x00 },
             .viewport_top_y_screen = 0,
@@ -53,6 +58,7 @@ const TerminalHandle = struct {
         };
         handle.handler.terminal = &handle.terminal;
         handle.handler.respuestas = &handle.respuestas;
+        handle.handler.titulo = &handle.titulo;
         handle.stream = terminal.Stream(*Handler).init(&handle.handler);
         handle.stream.parser.osc_parser.alloc = alloc;
         return handle;
@@ -61,6 +67,7 @@ const TerminalHandle = struct {
     fn deinit(self: *TerminalHandle) void {
         self.stream.deinit();
         self.respuestas.deinit();
+        self.titulo.deinit();
         self.terminal.deinit(self.alloc);
         self.alloc.destroy(self);
     }
@@ -69,6 +76,7 @@ const TerminalHandle = struct {
 const Handler = struct {
     terminal: *terminal.Terminal,
     respuestas: *Respuestas,
+    titulo: *std.ArrayList(u8),
 
     fn contestar(self: *Handler, bytes: []const u8) void {
         //  Si no hay memoria para contestar, mejor callarse que caerse: el
@@ -372,6 +380,14 @@ const Handler = struct {
     //  existe: si decimos que somos un VT220 con color, más vale contestar lo
     //  mismo que contesta él.
 
+    //  El título que pide la aplicación de dentro. Se guarda el último y ya:
+    //  quien lo lea decidirá si lo enseña.
+    pub fn changeWindowTitle(self: *Handler, title: []const u8) !void {
+        if (title.len > 512) return;
+        self.titulo.clearRetainingCapacity();
+        self.titulo.appendSlice(title) catch {};
+    }
+
     pub fn deviceAttributes(
         self: *Handler,
         req: terminal.DeviceAttributeReq,
@@ -541,6 +557,20 @@ export fn ghostty_vt_terminal_cursor_position(
 
 //  Recoge lo que el terminal tiene pendiente de contestar y vacía la cola.
 //  Quien nos usa lo escribe en el PTY: aquí no sabemos qué es un PTY.
+//  El título de ahora mismo. No vacía nada: se puede preguntar en cada marco.
+export fn ghostty_vt_terminal_title(terminal_ptr: ?*anyopaque) callconv(.C) ghostty_vt_bytes_t {
+    if (terminal_ptr == null) return .{ .ptr = null, .len = 0 };
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
+    if (handle.titulo.items.len == 0) return .{ .ptr = null, .len = 0 };
+
+    const alloc = std.heap.c_allocator;
+    const copia = alloc.alloc(u8, handle.titulo.items.len) catch {
+        return .{ .ptr = null, .len = 0 };
+    };
+    @memcpy(copia, handle.titulo.items);
+    return .{ .ptr = copia.ptr, .len = copia.len };
+}
+
 export fn ghostty_vt_terminal_take_responses(terminal_ptr: ?*anyopaque) callconv(.C) ghostty_vt_bytes_t {
     if (terminal_ptr == null) return .{ .ptr = null, .len = 0 };
     const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));

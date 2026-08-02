@@ -47,3 +47,17 @@ fn sin_preguntas_no_hay_respuestas() {
     t.feed(b"hola\r\nque tal").unwrap();
     assert!(t.take_responses().is_empty());
 }
+
+#[test]
+fn recuerda_el_titulo_que_le_pidan() {
+    let mut t = Terminal::new(20, 4).unwrap();
+    assert_eq!(t.title(), None, "de recién nacido no tiene título");
+
+    //  OSC 2: el título de la ventana, como lo pone claude o un `printf`.
+    t.feed(b"\x1b]2;claude\x07").unwrap();
+    assert_eq!(t.title().as_deref(), Some("claude"));
+
+    //  Y se queda con el último, que es lo que interesa.
+    t.feed(b"\x1b]2;codex\x07").unwrap();
+    assert_eq!(t.title().as_deref(), Some("codex"));
+}

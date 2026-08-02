@@ -151,6 +151,10 @@ struct Marco {
     usadas: u16,
     //  Dónde está la sesión, para que el pie diga algo útil.
     cwd: String,
+    //  Y cómo se llama lo que corre dentro, si lo ha dicho. Con varias
+    //  sesiones abiertas es lo que deja distinguir «claude» de «codex» en el
+    //  selector, en vez de «terminal 1» y «terminal 2».
+    titulo: String,
     //  [fila por la que empieza lo que se ve, filas que hay en total], en
     //  coordenadas del historial entero. La rejilla no es un Flickable —el
     //  historial vive aquí, no en la barra—, así que sin estos dos números la
@@ -207,6 +211,7 @@ fn fila_en_tramos(term: &Terminal, fila: u16, fondo: &str) -> Vec<Tramo> {
 //  primera fila y dejaba el cursor pintado una línea por debajo de donde de
 //  verdad escribes.
 fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str, cwd: String) -> Marco {
+    let titulo = term.title().unwrap_or_default();
     let mut salida = Vec::with_capacity(filas as usize);
     for f in 0..filas {
         salida.push(fila_en_tramos(term, f, fondo));
@@ -233,6 +238,7 @@ fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str, cwd: String) -> Ma
         filas_n: filas,
         usadas: ultima.max(fila),
         cwd,
+        titulo,
         scroll: [arriba, total.max(u32::from(filas))],
     }
 }

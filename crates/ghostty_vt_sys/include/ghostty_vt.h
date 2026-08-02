@@ -61,6 +61,9 @@ bool ghostty_vt_terminal_cursor_position(ghostty_vt_terminal_t terminal,
                                          uint16_t* col_out,
                                          uint16_t* row_out);
 
+/* El título que ha pedido la aplicación de dentro (OSC 0/2). */
+ghostty_vt_bytes_t ghostty_vt_terminal_title(ghostty_vt_terminal_t terminal);
+
 /* Lo que el terminal tiene pendiente de contestar; vacía la cola. */
 ghostty_vt_bytes_t ghostty_vt_terminal_take_responses(ghostty_vt_terminal_t terminal);
 
