@@ -307,6 +307,12 @@ impl TerminalSession {
         self.terminal.dump_viewport()
     }
 
+    //  Una fila del historial entero, para buscar hacia atrás. `None` cuando
+    //  ya no hay más: así se sabe dónde acaba sin preguntar el tamaño.
+    pub fn dump_screen_row(&self, row: u32) -> Option<String> {
+        self.terminal.dump_screen_row(row)
+    }
+
     pub fn dump_viewport_row(&self, row: u16) -> Result<String, Error> {
         self.terminal.dump_viewport_row(row)
     }

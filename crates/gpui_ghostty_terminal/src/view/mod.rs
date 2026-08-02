@@ -10,7 +10,20 @@ use gpui::{
 use std::ops::Range;
 use std::sync::Once;
 
-actions!(terminal_view, [Copy, Paste, SelectAll, Tab, TabPrev]);
+actions!(
+    terminal_view,
+    [
+        Copy,
+        Paste,
+        SelectAll,
+        Tab,
+        TabPrev,
+        IncreaseFontSize,
+        DecreaseFontSize,
+        ResetFontSize,
+        Find
+    ]
+);
 
 const KEY_CONTEXT: &str = "Terminal";
 static KEY_BINDINGS: Once = Once::new();
@@ -137,6 +150,18 @@ fn is_url_byte(b: u8) -> bool {
         )
 }
 
+//  Con lo que el escritorio tenga puesto. Se suelta y no se espera: si no
+//  hay xdg-open, el clic simplemente no hace nada, que es mejor que colgar
+//  la terminal esperando a un proceso que no existe.
+fn abrir_enlace(url: &str) {
+    let _ = std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 fn url_at_byte_index(text: &str, index: usize) -> Option<String> {
     let bytes = text.as_bytes();
     if bytes.is_empty() {
@@ -227,6 +252,26 @@ pub struct TerminalView {
     font: gpui::Font,
     on_resize: Option<std::rc::Rc<dyn Fn(u16, u16)>>,
     padding: Pixels,
+    //  Sin poner, manda el tamaño del anfitrión. Con él, manda esto — y de
+    //  ahí sale también el alto de línea, que si no se queda del tamaño
+    //  viejo y las letras se montan.
+    font_size: Option<Pixels>,
+    font_size_base: Option<Pixels>,
+    busqueda: Option<Busqueda>,
+    //  Hasta cuándo dura el destello de la campana.
+    campana_hasta: Option<std::time::Instant>,
+}
+
+//  Buscar en el historial: el patrón que se teclea, las filas donde aparece
+//  —en coordenadas de historial, no de pantalla— y por cuál vamos.
+#[derive(Debug, Default)]
+struct Busqueda {
+    patron: String,
+    resultados: Vec<u32>,
+    indice: usize,
+    //  Con qué patrón se calcularon los resultados, para no rebuscar el
+    //  historial entero en cada pulsación.
+    calculado: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -267,6 +312,10 @@ impl TerminalView {
             font: crate::default_terminal_font(),
             on_resize: None,
             padding: px(0.),
+            font_size: None,
+            font_size_base: None,
+            busqueda: None,
+            campana_hasta: None,
         }
         .with_refreshed_viewport()
     }
@@ -312,6 +361,10 @@ impl TerminalView {
             font: crate::default_terminal_font(),
             on_resize: None,
             padding: px(0.),
+            font_size: None,
+            font_size_base: None,
+            busqueda: None,
+            campana_hasta: None,
         }
         .with_refreshed_viewport()
     }
@@ -332,6 +385,198 @@ impl TerminalView {
     // elemento ya acolchado, así que cols/rows se descuentan solos.
     pub fn set_padding(&mut self, padding: Pixels) {
         self.padding = padding;
+    }
+
+    //  El tamaño de letra de partida. Se recuerda aparte para que «volver al
+    //  normal» sepa a dónde volver.
+    pub fn set_font_size(&mut self, size: Pixels) {
+        self.font_size = Some(size);
+        self.font_size_base = Some(size);
+        self.invalidate_layout();
+    }
+
+    fn invalidate_layout(&mut self) {
+        self.line_layouts.clear();
+        self.line_layout_key = None;
+    }
+
+    fn current_font_size(&self, window: &Window) -> Pixels {
+        self.font_size
+            .unwrap_or_else(|| window.text_style().font_size.to_pixels(window.rem_size()))
+    }
+
+    fn on_increase_font_size(
+        &mut self,
+        _: &IncreaseFontSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.zoom(1.0, window, cx);
+    }
+
+    fn on_decrease_font_size(
+        &mut self,
+        _: &DecreaseFontSize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.zoom(-1.0, window, cx);
+    }
+
+    fn on_reset_font_size(
+        &mut self,
+        _: &ResetFontSize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(base) = self.font_size_base {
+            self.font_size = Some(base);
+            self.invalidate_layout();
+            cx.notify();
+        }
+    }
+
+    //  La campana, vista: un destello de 120 ms sobre la pantalla. Devuelve
+    //  si sigue encendida, que es lo que el anfitrión necesita para saber si
+    //  tiene que volver a pedir un pintado.
+    pub fn tocar_campana(&mut self, cx: &mut Context<Self>) {
+        self.campana_hasta =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(120));
+        cx.notify();
+    }
+
+    pub fn campana_encendida(&mut self, cx: &mut Context<Self>) -> bool {
+        match self.campana_hasta {
+            Some(hasta) if std::time::Instant::now() < hasta => true,
+            Some(_) => {
+                self.campana_hasta = None;
+                cx.notify();
+                false
+            }
+            None => false,
+        }
+    }
+
+    // ── buscar en el historial ────────────────────────────────────
+
+    fn on_find(&mut self, _: &Find, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.busqueda.is_none() {
+            self.busqueda = Some(Busqueda::default());
+            cx.notify();
+        }
+    }
+
+    fn cerrar_busqueda(&mut self, cx: &mut Context<Self>) {
+        self.busqueda = None;
+        cx.notify();
+    }
+
+    fn tecla_de_busqueda(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
+        match keystroke.key.as_str() {
+            "escape" => {
+                self.cerrar_busqueda(cx);
+                return;
+            }
+            "enter" => {
+                self.saltar(keystroke.modifiers.shift, cx);
+                return;
+            }
+            "backspace" => {
+                if let Some(b) = self.busqueda.as_mut() {
+                    b.patron.pop();
+                }
+                cx.notify();
+                return;
+            }
+            _ => {}
+        }
+
+        //  Solo texto: los atajos con control mientras se busca no significan
+        //  nada aquí y no tienen por qué colarse en el patrón.
+        if keystroke.modifiers.control || keystroke.modifiers.alt {
+            return;
+        }
+        if let Some(texto) = keystroke.key_char.as_ref() {
+            if let Some(b) = self.busqueda.as_mut() {
+                b.patron.push_str(texto);
+            }
+            cx.notify();
+        }
+    }
+
+    //  Recorre el historial de arriba abajo apuntando en qué filas está el
+    //  patrón. Se hace al saltar y no al teclear: rebuscar miles de líneas en
+    //  cada letra se nota, y buscar es algo que se pide, no que se sufre.
+    fn recalcular_busqueda(&mut self) {
+        let Some(b) = self.busqueda.as_mut() else {
+            return;
+        };
+        if b.calculado == b.patron {
+            return;
+        }
+
+        let patron = b.patron.to_lowercase();
+        b.calculado = b.patron.clone();
+        b.resultados.clear();
+        b.indice = 0;
+        if patron.is_empty() {
+            return;
+        }
+
+        let mut resultados = Vec::new();
+        let mut fila = 0u32;
+        while let Some(texto) = self.session.dump_screen_row(fila) {
+            if texto.to_lowercase().contains(&patron) {
+                resultados.push(fila);
+            }
+            fila += 1;
+        }
+        if let Some(b) = self.busqueda.as_mut() {
+            b.resultados = resultados;
+        }
+    }
+
+    fn saltar(&mut self, hacia_atras: bool, cx: &mut Context<Self>) {
+        self.recalcular_busqueda();
+
+        let destino = {
+            let Some(b) = self.busqueda.as_mut() else {
+                return;
+            };
+            if b.resultados.is_empty() {
+                cx.notify();
+                return;
+            }
+            //  La primera vez se queda en el primero; a partir de ahí se va
+            //  moviendo, y da la vuelta al llegar al final.
+            if b.calculado == b.patron && b.indice < b.resultados.len() {
+                let n = b.resultados.len();
+                b.indice = if hacia_atras {
+                    (b.indice + n - 1) % n
+                } else {
+                    (b.indice + 1) % n
+                };
+            }
+            b.resultados[b.indice]
+        };
+
+        //  Al principio de todo y luego bajar: es la única forma de plantarse
+        //  en una fila concreta con lo que la API da hoy, y sale exacta.
+        let _ = self.session.scroll_viewport_top();
+        let _ = self.session.scroll_viewport(destino as i32);
+        self.sync_viewport_scroll_tracking();
+        self.refresh_viewport();
+        cx.notify();
+    }
+
+    //  De punto en punto y con topes: por debajo de seis no se lee y por
+    //  encima de setenta y dos una rejilla de terminal deja de tener sentido.
+    fn zoom(&mut self, delta: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let actual = f32::from(self.current_font_size(window));
+        let nuevo = (actual + delta).clamp(6.0, 72.0);
+        self.font_size = Some(px(nuevo));
+        self.invalidate_layout();
+        cx.notify();
     }
 
     // Cambiar el ambiente en marcha. Hay que rehacer el viewport: las celdas
@@ -804,23 +1049,20 @@ impl TerminalView {
             return;
         }
 
-        if event.button == MouseButton::Left && event.modifiers.platform {
+        //  Ctrl+clic abre el enlace, que es lo que espera todo el mundo. Antes
+        //  era Súper+clic y copiaba: dos decisiones raras juntas, y en
+        //  Hyprland la tecla Súper la tiene el compositor.
+        if event.button == MouseButton::Left && event.modifiers.control {
             if let Some((col, row)) = self.mouse_position_to_cell(event.position, window) {
                 if let Some(link) = self.session.hyperlink_at(col, row) {
-                    let item = ClipboardItem::new_string(link);
-                    cx.write_to_clipboard(item.clone());
-                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                    cx.write_to_primary(item);
+                    abrir_enlace(&link);
                     return;
                 }
 
                 if let Some(line) = self.viewport_lines.get(row.saturating_sub(1) as usize)
                     && let Some(url) = url_at_column_in_line(line, col)
                 {
-                    let item = ClipboardItem::new_string(url);
-                    cx.write_to_clipboard(item.clone());
-                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                    cx.write_to_primary(item);
+                    abrir_enlace(&url);
                     return;
                 }
             }
@@ -828,10 +1070,7 @@ impl TerminalView {
             if let Some(index) = self.mouse_position_to_viewport_index(event.position, window)
                 && let Some(url) = self.url_at_viewport_index(index)
             {
-                let item = ClipboardItem::new_string(url);
-                cx.write_to_clipboard(item.clone());
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                cx.write_to_primary(item);
+                abrir_enlace(&url);
                 return;
             }
         }
@@ -989,6 +1228,26 @@ impl TerminalView {
             return;
         }
         let keystroke = raw_keystroke.with_simulated_ime();
+
+        if std::env::var("K4TERM_TRAZA_TECLAS").is_ok() {
+            eprintln!(
+                "tecla={:?} ctrl={} shift={} alt={} char={:?}",
+                keystroke.key,
+                keystroke.modifiers.control,
+                keystroke.modifiers.shift,
+                keystroke.modifiers.alt,
+                keystroke.key_char
+            );
+        }
+
+        //  Con la búsqueda abierta, el teclado es suyo: lo que se escriba va
+        //  al patrón y no a la shell, que si no se buscaría a ciegas mientras
+        //  se le teclea a un programa por detrás.
+        if self.busqueda.is_some() {
+            self.tecla_de_busqueda(&keystroke, cx);
+            cx.stop_propagation();
+            return;
+        }
 
         if keystroke.modifiers.platform || keystroke.modifiers.function {
             return;
@@ -1172,7 +1431,7 @@ impl TerminalView {
             return None;
         }
 
-        let (_, cell_height) = cell_metrics(window, &self.font)?;
+        let (_, cell_height) = cell_metrics(window, &self.font, self.font_size)?;
         let y = f32::from(position.y);
         let mut row_index = (y / cell_height).floor() as i32;
         if row_index < 0 {
@@ -1208,7 +1467,7 @@ impl TerminalView {
         let rows = self.session.rows();
 
         let position = self.mouse_position_to_local(position);
-        let (cell_width, cell_height) = cell_metrics(window, &self.font)?;
+        let (cell_width, cell_height) = cell_metrics(window, &self.font, self.font_size)?;
         let x = f32::from(position.x);
         let y = f32::from(position.y);
 
@@ -1314,7 +1573,7 @@ impl EntityInputHandler for TerminalView {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let (col, row) = self.session.cursor_position()?;
-        let (cell_width, cell_height) = cell_metrics(window, &self.font)?;
+        let (cell_width, cell_height) = cell_metrics(window, &self.font, self.font_size)?;
 
         let base_x = element_bounds.left() + px(cell_width * (col.saturating_sub(1)) as f32);
         let base_y = element_bounds.top() + px(cell_height * (row.saturating_sub(1)) as f32);
@@ -1607,9 +1866,13 @@ impl Element for TerminalTextElement {
     ) -> Self::PrepaintState {
         let mut style = window.text_style();
         let font = { self.view.read(cx).font.clone() };
+        let font_size_override = { self.view.read(cx).font_size };
         style.font_family = font.family.clone();
         style.font_features = crate::default_terminal_font_features();
         style.font_fallbacks = font.fallbacks.clone();
+        if let Some(s) = font_size_override {
+            style.font_size = s.into();
+        }
         let default_fg = { self.view.read(cx).session.default_foreground() };
         style.color = hsla_from_rgb(default_fg);
         let rem_size = window.rem_size();
@@ -1619,7 +1882,7 @@ impl Element for TerminalTextElement {
         let run_font = style.font();
         let run_color = style.color;
 
-        let cell_width = cell_metrics(window, &font).map(|(w, _)| px(w));
+        let cell_width = cell_metrics(window, &font, font_size_override).map(|(w, _)| px(w));
 
         self.view.update(cx, |view, _cx| {
             if view.viewport_lines.is_empty() {
@@ -1726,7 +1989,7 @@ impl Element for TerminalTextElement {
         });
 
         let default_bg = { self.view.read(cx).session.default_background() };
-        let background_quads = cell_metrics(window, &font)
+        let background_quads = cell_metrics(window, &font, font_size_override)
             .map(|(cell_width, _)| {
                 let origin = bounds.origin;
                 let mut quads: Vec<PaintQuad> = Vec::new();
@@ -1788,7 +2051,7 @@ impl Element for TerminalTextElement {
                     return None;
                 }
                 let (col, row) = cursor_position?;
-                let (cell_width, _) = cell_metrics(window, &font)?;
+                let (cell_width, _) = cell_metrics(window, &font, font_size_override)?;
 
                 let origin_x = bounds.left() + px(cell_width * (col.saturating_sub(1)) as f32);
                 let origin_y = bounds.top() + line_height * (row.saturating_sub(1)) as f32;
@@ -1899,7 +2162,7 @@ impl Element for TerminalTextElement {
             })
             .unwrap_or_default();
 
-        let box_drawing_quads = cell_metrics(window, &font)
+        let box_drawing_quads = cell_metrics(window, &font, font_size_override)
             .map(|(cell_width, _)| {
                 use unicode_width::UnicodeWidthChar as _;
                 let default_fg = run_color;
@@ -2011,7 +2274,8 @@ impl Element for TerminalTextElement {
         cx: &mut App,
     ) {
         let font = self.view.read(cx).font.clone();
-        let metrics = cell_metrics(window, &font);
+        let font_size_override = self.view.read(cx).font_size;
+        let metrics = cell_metrics(window, &font, font_size_override);
         self.view.update(cx, |view, cx| {
             view.last_bounds = Some(bounds);
 
@@ -2126,6 +2390,10 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::on_paste))
             .on_action(cx.listener(Self::on_tab))
             .on_action(cx.listener(Self::on_tab_prev))
+            .on_action(cx.listener(Self::on_increase_font_size))
+            .on_action(cx.listener(Self::on_decrease_font_size))
+            .on_action(cx.listener(Self::on_reset_font_size))
+            .on_action(cx.listener(Self::on_find))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -2140,15 +2408,57 @@ impl Render for TerminalView {
             .font(self.font.clone())
             .p(self.padding)
             .whitespace_nowrap()
+            .relative()
             .child(TerminalTextElement { view: cx.entity() })
+            .children(
+                self.campana_hasta
+                    .filter(|hasta| std::time::Instant::now() < *hasta)
+                    .map(|_| {
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .bg(gpui::rgba(0xffffff20))
+                    }),
+            )
+            //  La barra de búsqueda va por encima y no dentro del flujo: así
+            //  no le quita filas a la rejilla ni la obliga a rehacerse cada
+            //  vez que se abre o se cierra.
+            .children(self.busqueda.as_ref().map(|b| {
+                let total = b.resultados.len();
+                let cuenta = if b.calculado != b.patron {
+                    "…".to_string()
+                } else if total == 0 {
+                    "0".to_string()
+                } else {
+                    format!("{}/{}", b.indice + 1, total)
+                };
+
+                div()
+                    .absolute()
+                    .bottom_2()
+                    .right_2()
+                    .px_3()
+                    .py_1()
+                    .rounded_md()
+                    .bg(gpui::rgb(0x1c1c1e))
+                    .text_color(gpui::rgb(0xffffff))
+                    .child(format!("buscar: {}   {}", b.patron, cuenta))
+            }))
     }
 }
 
-pub(crate) fn cell_metrics(window: &mut gpui::Window, font: &gpui::Font) -> Option<(f32, f32)> {
+pub(crate) fn cell_metrics(
+    window: &mut gpui::Window,
+    font: &gpui::Font,
+    size: Option<Pixels>,
+) -> Option<(f32, f32)> {
     let mut style = window.text_style();
     style.font_family = font.family.clone();
     style.font_features = crate::default_terminal_font_features();
     style.font_fallbacks = font.fallbacks.clone();
+    if let Some(s) = size {
+        style.font_size = s.into();
+    }
 
     let rem_size = window.rem_size();
     let font_size = style.font_size.to_pixels(rem_size);

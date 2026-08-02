@@ -339,6 +339,36 @@ export fn ghostty_vt_terminal_dump_viewport_row(
     return .{ .ptr = slice.ptr, .len = slice.len };
 }
 
+//  Una fila del historial completo, contando desde el principio de todo lo
+//  que la terminal recuerda (no de lo que se ve). Es lo que hace falta para
+//  buscar hacia atrás: `viewport` solo llega a la pantalla de ahora.
+//
+//  Devuelve vacío cuando se pide una fila que no existe, y así quien busca
+//  sabe dónde parar sin tener que preguntar cuántas hay.
+export fn ghostty_vt_terminal_dump_screen_row(
+    terminal_ptr: ?*anyopaque,
+    row: u32,
+) callconv(.C) ghostty_vt_bytes_t {
+    if (terminal_ptr == null) return .{ .ptr = null, .len = 0 };
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
+
+    const pt: terminal.point.Point = .{ .screen = .{ .x = 0, .y = row } };
+    const pin = handle.terminal.screen.pages.pin(pt) orelse return .{ .ptr = null, .len = 0 };
+
+    const alloc = std.heap.c_allocator;
+    var builder = std.ArrayList(u8).init(alloc);
+    errdefer builder.deinit();
+
+    handle.terminal.screen.pages.encodeUtf8(builder.writer(), .{
+        .tl = pin,
+        .br = pin,
+        .unwrap = false,
+    }) catch return .{ .ptr = null, .len = 0 };
+
+    const slice = builder.toOwnedSlice() catch return .{ .ptr = null, .len = 0 };
+    return .{ .ptr = slice.ptr, .len = slice.len };
+}
+
 const CellStyle = extern struct {
     fg_r: u8,
     fg_g: u8,

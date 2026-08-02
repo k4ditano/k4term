@@ -64,6 +64,10 @@ bool ghostty_vt_terminal_cursor_position(ghostty_vt_terminal_t terminal,
 ghostty_vt_bytes_t ghostty_vt_terminal_dump_viewport(ghostty_vt_terminal_t terminal);
 ghostty_vt_bytes_t ghostty_vt_terminal_dump_viewport_row(ghostty_vt_terminal_t terminal,
                                                          uint16_t row);
+// Fila del historial completo (0 = lo más antiguo que se recuerda). Vacío
+// cuando la fila no existe.
+ghostty_vt_bytes_t ghostty_vt_terminal_dump_screen_row(ghostty_vt_terminal_t terminal,
+                                                       uint32_t row);
 ghostty_vt_bytes_t ghostty_vt_terminal_dump_viewport_row_cell_styles(ghostty_vt_terminal_t terminal,
                                                                      uint16_t row);
 ghostty_vt_bytes_t ghostty_vt_terminal_dump_viewport_row_style_runs(ghostty_vt_terminal_t terminal,

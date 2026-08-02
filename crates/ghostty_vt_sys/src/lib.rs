@@ -61,6 +61,11 @@ unsafe extern "C" {
         row: u16,
     ) -> ghostty_vt_bytes_t;
 
+    pub fn ghostty_vt_terminal_dump_screen_row(
+        terminal: *mut core::ffi::c_void,
+        row: u32,
+    ) -> ghostty_vt_bytes_t;
+
     pub fn ghostty_vt_terminal_dump_viewport_row_cell_styles(
         terminal: *mut core::ffi::c_void,
         row: u16,

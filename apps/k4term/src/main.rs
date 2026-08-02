@@ -23,19 +23,25 @@ use std::thread;
 use std::time::Duration;
 
 use gpui::{App, AppContext, Application, KeyBinding, TitlebarOptions, WindowOptions};
-use gpui_ghostty_terminal::view::{Copy, Paste, SelectAll, TerminalInput, TerminalView};
+use gpui_ghostty_terminal::view::{
+    Copy, DecreaseFontSize, Find, IncreaseFontSize, Paste, ResetFontSize, SelectAll, TerminalInput,
+    TerminalView,
+};
 use gpui_ghostty_terminal::{Rgb, TerminalConfig, TerminalSession};
-use k4term_puente::{Aviso, Suceso, barra, osc::Escaner, tema, trabajos};
+use k4term_puente::{Ajustes, Aviso, Suceso, barra, osc::Escaner, tema, trabajos};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
-fn fuente_de_la_casa() -> gpui::Font {
+//  La que digan los ajustes, con los respaldos de siempre detrás: si la
+//  elegida no tiene un glifo —o no está instalada— que haya de dónde tirar.
+fn fuente(nombre: String) -> gpui::Font {
     let fallbacks = gpui::FontFallbacks::from_fonts(vec![
+        "MesloLGS Nerd Font Mono".to_string(),
         "MesloLGS Nerd Font".to_string(),
         "Symbols Nerd Font Mono".to_string(),
         "DejaVu Sans Mono".to_string(),
         "Noto Color Emoji".to_string(),
     ]);
-    let mut font = gpui::font("MesloLGS Nerd Font Mono");
+    let mut font = gpui::font(nombre);
     font.fallbacks = Some(fallbacks);
     font
 }
@@ -94,10 +100,25 @@ fn directorio_inicial(pedido: Option<PathBuf>) -> Option<PathBuf> {
 
 fn main() {
     Application::new().run(|cx: &mut App| {
+        let ajustes = Ajustes::leer();
+
         cx.bind_keys([
             KeyBinding::new("ctrl-shift-a", SelectAll, None),
             KeyBinding::new("ctrl-shift-c", Copy, None),
             KeyBinding::new("ctrl-shift-v", Paste, None),
+            //  Todas las formas de decir «más» y «menos». En Linux gpui
+            //  nombra las teclas por su keysym —`minus`, `equal`, `plus`— y
+            //  no por el símbolo, y encima cada distribución pone el `+` en
+            //  un sitio: registrarlas todas sale más barato que adivinar.
+            KeyBinding::new("ctrl-plus", IncreaseFontSize, None),
+            KeyBinding::new("ctrl-equal", IncreaseFontSize, None),
+            KeyBinding::new("ctrl-shift-equal", IncreaseFontSize, None),
+            KeyBinding::new("ctrl-+", IncreaseFontSize, None),
+            KeyBinding::new("ctrl-=", IncreaseFontSize, None),
+            KeyBinding::new("ctrl-minus", DecreaseFontSize, None),
+            KeyBinding::new("ctrl--", DecreaseFontSize, None),
+            KeyBinding::new("ctrl-0", ResetFontSize, None),
+            KeyBinding::new("ctrl-shift-f", Find, None),
         ]);
 
         let opciones = WindowOptions {
@@ -142,7 +163,9 @@ fn main() {
                     c
                 }
                 None => {
-                    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+                    let shell = ajustes.shell.clone().unwrap_or_else(|| {
+                        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+                    });
                     let mut c = CommandBuilder::new(shell);
                     c.arg("-l");
                     c
@@ -200,6 +223,7 @@ fn main() {
             //  El lector es también quien vigila los marcadores de la shell:
             //  los bytes pasan por aquí antes de llegar al terminal, así que
             //  se miran al vuelo y siguen intactos.
+            let (campana_tx, campana_rx) = mpsc::channel::<()>();
             let avisos = trabajos::notificador(std::process::id());
             thread::spawn(move || {
                 let mut buf = [0u8; 8192];
@@ -230,6 +254,12 @@ fn main() {
                                 let _ = avisos.send(Aviso::Acaba { salida });
                                 mandato.clear();
                             }
+                            //  La campana la ve el escáner y la enseña la
+                            //  ventana: un destello corto, que un pitido a
+                            //  las tres de la mañana no lo quiere nadie.
+                            Suceso::Campana => {
+                                let _ = campana_tx.send(());
+                            }
                             // El directorio se sigue ya, pero todavía no lo
                             // usa nadie: será el «abre otra aquí mismo».
                             Suceso::Directorio(_) => {}
@@ -253,8 +283,9 @@ fn main() {
                 });
 
                 let mut vista = TerminalView::new_with_input(session, focus_handle, input);
-                vista.set_font(fuente_de_la_casa());
-                vista.set_padding(gpui::px(12.));
+                vista.set_font(fuente(ajustes.fuente.clone()));
+                vista.set_font_size(gpui::px(ajustes.tamano));
+                vista.set_padding(gpui::px(ajustes.margen));
 
                 let master_para_resize = master.clone();
                 vista.set_on_resize(move |cols, rows| {
@@ -287,8 +318,20 @@ fn main() {
                         // fotogramas la barra puede haber escrito tres pasos
                         // de una animación de tinte.
                         let ultimo_tema = std::iter::from_fn(|| temas.try_recv().ok()).last();
+                        let campana = std::iter::from_fn(|| campana_rx.try_recv().ok()).count() > 0;
 
-                        if batch.is_empty() && ultimo_tema.is_none() {
+                        //  `apagando` mantiene vivo el bucle mientras dure el
+                        //  destello: sin salida nueva nadie volvería a pedir
+                        //  un pintado y el fogonazo se quedaría encendido.
+                        let mut apagando = false;
+                        cx.update(|_, cx| {
+                            view_for_task.update(cx, |this, cx| {
+                                apagando = this.campana_encendida(cx);
+                            });
+                        })
+                        .ok();
+
+                        if batch.is_empty() && ultimo_tema.is_none() && !campana && !apagando {
                             continue;
                         }
 
@@ -299,6 +342,9 @@ fn main() {
                                 }
                                 if let Some(t) = ultimo_tema {
                                     this.set_default_colors(rgb(t.tinta), rgb(t.fondo), cx);
+                                }
+                                if campana {
+                                    this.tocar_campana(cx);
                                 }
                             });
                         })

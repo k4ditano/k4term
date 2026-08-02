@@ -73,6 +73,8 @@ enum Orden {
     Pinta,
     #[serde(rename = "donde")]
     Donde,
+    #[serde(rename = "rueda")]
+    Rueda { lineas: i32 },
 }
 
 enum Recado {
@@ -80,6 +82,7 @@ enum Recado {
     Medida { cols: u16, filas: u16 },
     Pinta,
     Donde,
+    Rueda { lineas: i32 },
 }
 
 #[derive(Serialize)]
@@ -240,6 +243,11 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32) {
                 sucio = true;
                 desde.get_or_insert_with(Instant::now);
             }
+            Ok(Recado::Rueda { lineas }) => {
+                let _ = term.scroll_viewport(lineas);
+                sucio = true;
+                desde.get_or_insert_with(Instant::now);
+            }
             Ok(Recado::Donde) => {
                 let ruta = directorio(pid_shell).unwrap_or_default();
                 if let Ok(json) = serde_json::to_string(&Donde { que: "donde", ruta }) {
@@ -365,6 +373,9 @@ fn main() {
                 }
                 Orden::Donde => {
                     let _ = tx.send(Recado::Donde);
+                }
+                Orden::Rueda { lineas } => {
+                    let _ = tx.send(Recado::Rueda { lineas });
                 }
             }
         }

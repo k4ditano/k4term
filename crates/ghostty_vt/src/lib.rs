@@ -163,6 +163,26 @@ impl Terminal {
         Ok(s)
     }
 
+    //  Una fila del historial entero (0 = lo más viejo que se recuerda), no
+    //  solo de lo que se ve. `None` cuando esa fila ya no existe: es la
+    //  forma de saber dónde acaba el historial sin preguntar el tamaño.
+    pub fn dump_screen_row(&self, row: u32) -> Option<String> {
+        let bytes =
+            unsafe { ghostty_vt_sys::ghostty_vt_terminal_dump_screen_row(self.ptr.as_ptr(), row) };
+        if bytes.ptr.is_null() {
+            return None;
+        }
+        if bytes.len == 0 {
+            unsafe { ghostty_vt_sys::ghostty_vt_bytes_free(bytes) };
+            return None;
+        }
+
+        let slice = unsafe { std::slice::from_raw_parts(bytes.ptr, bytes.len) };
+        let salida = String::from_utf8_lossy(slice).into_owned();
+        unsafe { ghostty_vt_sys::ghostty_vt_bytes_free(bytes) };
+        Some(salida)
+    }
+
     pub fn dump_viewport_row_cell_styles(&self, row: u16) -> Result<Vec<CellStyle>, Error> {
         let bytes = unsafe {
             ghostty_vt_sys::ghostty_vt_terminal_dump_viewport_row_cell_styles(

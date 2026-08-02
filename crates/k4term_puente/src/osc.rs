@@ -25,6 +25,10 @@ pub enum Suceso {
     Termina { salida: i32 },
     Mandato(String),
     Directorio(String),
+    //  Un BEL a secas. Ojo: el mismo byte cierra las secuencias OSC, así que
+    //  solo cuenta como campana fuera de una — y eso lo sabe el escáner
+    //  porque lleva el estado.
+    Campana,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +70,8 @@ impl Escaner {
                 Estado::Fuera => {
                     if b == 0x1b {
                         self.estado = Estado::TrasEscape;
+                    } else if b == 0x07 {
+                        sucesos.push(Suceso::Campana);
                     }
                 }
                 Estado::TrasEscape => {
@@ -227,6 +233,17 @@ mod pruebas {
     fn el_texto_corriente_no_dispara_nada() {
         let mut e = Escaner::new();
         assert!(e.tragar(b"hola \x1b[31mrojo\x1b[0m y ] suelto\n").is_empty());
+    }
+
+    #[test]
+    fn la_campana_suena_suelta_pero_no_cerrando_una_secuencia() {
+        let mut e = Escaner::new();
+        assert_eq!(e.tragar(b"ojo\x07"), vec![Suceso::Campana]);
+        // aquí el mismo byte solo está cerrando el OSC: no es campana
+        assert_eq!(
+            e.tragar(b"\x1b]633;E;ls\x07"),
+            vec![Suceso::Mandato("ls".into())]
+        );
     }
 
     #[test]

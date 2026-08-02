@@ -6,11 +6,13 @@
 //  sin k4 delante, este crate se queda callado y no pasa nada — de eso trata
 //  tenerlo aparte.
 
+pub mod ajustes;
 pub mod barra;
 pub mod osc;
 pub mod tema;
 pub mod trabajos;
 
+pub use ajustes::Ajustes;
 pub use osc::{Escaner, Suceso};
 pub use tema::Tema;
 pub use trabajos::Aviso;
