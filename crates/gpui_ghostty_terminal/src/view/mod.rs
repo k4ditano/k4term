@@ -334,6 +334,19 @@ impl TerminalView {
         self.padding = padding;
     }
 
+    // Cambiar el ambiente en marcha. Hay que rehacer el viewport: las celdas
+    // que heredan el color por defecto lo llevan ya resuelto dentro.
+    pub fn set_default_colors(
+        &mut self,
+        fg: ghostty_vt::Rgb,
+        bg: ghostty_vt::Rgb,
+        cx: &mut Context<Self>,
+    ) {
+        self.session.set_default_colors(fg, bg);
+        self.refresh_viewport();
+        cx.notify();
+    }
+
     fn utf16_len(s: &str) -> usize {
         s.chars().map(|ch| ch.len_utf16()).sum()
     }

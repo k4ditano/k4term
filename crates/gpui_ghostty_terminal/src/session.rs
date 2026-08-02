@@ -45,6 +45,14 @@ impl TerminalSession {
         self.config.rows
     }
 
+    //  Los colores de fondo y tinta se pueden cambiar en marcha: es lo que
+    //  permite que la terminal siga el ambiente de la barra sin reiniciarse.
+    pub fn set_default_colors(&mut self, fg: Rgb, bg: Rgb) {
+        self.config.default_fg = fg;
+        self.config.default_bg = bg;
+        self.terminal.set_default_colors(fg, bg);
+    }
+
     pub fn default_foreground(&self) -> Rgb {
         self.config.default_fg
     }

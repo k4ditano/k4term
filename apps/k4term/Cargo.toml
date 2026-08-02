@@ -7,5 +7,6 @@ license = "Apache-2.0"
 
 [dependencies]
 gpui_ghostty_terminal = { path = "../../crates/gpui_ghostty_terminal" }
+k4term_puente = { path = "../../crates/k4term_puente" }
 gpui = { workspace = true }
 portable-pty = "0.9"
