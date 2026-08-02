@@ -5,6 +5,42 @@ This repository is a minimal, pinned, and testable embedded terminal stack:
 - VT parsing/state: Ghostty's terminal core (vendored as a submodule)
 - Rendering/UI: GPUI (from Zed), with a custom renderer (no Ghostty renderer reuse)
 
+## k4term
+
+On top of that stack this repo ships the terminal itself, in two binaries that
+are the same session seen two ways:
+
+- `apps/k4term`: the window. GPUI, the house font, live theming from the k4 bar.
+- `apps/k4term-isla`: the same session minus the window. It serves the grid as
+  JSON lines on stdout and takes keys on stdin, which is how the bar embeds a
+  real terminal inside its island. The bar starts it on its own, so it has to
+  be on `PATH`.
+
+Install both, plus the icon and the desktop entry, into your home — no sudo,
+nothing that collides with distro packages:
+
+```sh
+./instalar            # build in release and copy the binaries
+./instalar --enlace   # symlink to target/release instead (for development)
+./instalar --quitar   # undo it
+```
+
+The icon is drawn, not shipped as a blob: `python3 assets/icono.py` renders
+every size from `assets/icono.py` itself. `assets/referencia.png` is the
+generated design it was traced from.
+
+With the k4 bar installed you also get `SUPER + Shift + T` (the session in the
+island) and `SUPER + Alt + T` (pop it out into a window, in whatever directory
+it was left).
+
+Shell integration is the one thing the installer will not do for you — it is
+your shell's config. Without it k4term still works, but the bar cannot know
+which command is running or how long it has been going:
+
+```sh
+echo 'source /path/to/k4term/integracion/k4term.zsh' >> ~/.zshrc
+```
+
 ## Workspace Layout
 
 - `crates/ghostty_vt_sys`: Zig build + C ABI for the Ghostty VT core

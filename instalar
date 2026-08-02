@@ -1,0 +1,169 @@
+#!/bin/sh
+#  Compila k4term y lo deja instalado en el sistema.
+#
+#  Instala en el HOME y no en /usr: nada de sudo, nada que se pise con los
+#  paquetes de la distribución, y desinstalar es borrar cuatro rutas que este
+#  mismo fichero enumera al final.
+#
+#      ./instalar              compila y copia los binarios
+#      ./instalar --enlace     enlaza a target/release en vez de copiar
+#      ./instalar --quitar     deshace la instalación
+#
+#  `--enlace` es para quien esté tocando el código: con enlaces, cada
+#  `cargo build --release` queda puesto sin volver a pasar por aquí. Con
+#  copias —lo de por defecto— la instalación no depende de que el repositorio
+#  siga donde está.
+
+set -eu
+
+RAIZ=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
+APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+ICONOS="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
+
+LADOS="512 256 128 64 48 32 24 16"
+
+nota()  { printf '  %s\n' "$1"; }
+aviso() { printf '  \033[33m!\033[0m %s\n' "$1"; }
+mal()   { printf '  \033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
+bien()  { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+
+quitar() {
+    rm -f "$BIN/k4term" "$BIN/k4term-isla" "$APPS/k4term.desktop"
+    for lado in $LADOS; do
+        rm -f "$ICONOS/${lado}x${lado}/apps/k4term.png"
+    done
+    bien "quitado de $BIN, $APPS y $ICONOS"
+    nota "La integración de la shell, si la pusiste, sigue en tu ~/.zshrc"
+    nota "o ~/.config/fish/config.fish: quítala tú, que es tuya."
+    exit 0
+}
+
+ENLACE=0
+for arg in "$@"; do
+    case "$arg" in
+        --enlace) ENLACE=1 ;;
+        --quitar) quitar ;;
+        *) mal "no conozco la opción $arg" ;;
+    esac
+done
+
+printf '\n  k4term\n\n'
+
+########################################################################
+#  Lo que hace falta para compilar
+########################################################################
+command -v cargo >/dev/null 2>&1 || mal "no encuentro cargo: instala Rust."
+
+#  El núcleo VT de ghostty se compila con Zig, y con UNA versión de Zig: la
+#  0.14.1. Si no está en el PATH, el build.rs busca en .context/zig.
+if ! command -v zig >/dev/null 2>&1 && [ ! -x "$RAIZ/.context/zig/zig" ]; then
+    aviso "no hay zig ni en el PATH ni en .context/zig"
+    nota "ejecuta ./scripts/bootstrap-zig.sh y vuelve"
+    exit 1
+fi
+
+if [ ! -e "$RAIZ/vendor/ghostty/build.zig" ]; then
+    aviso "falta el ghostty vendorizado"
+    nota "ejecuta: git -C $RAIZ submodule update --init --recursive"
+    exit 1
+fi
+
+########################################################################
+#  Compilar
+########################################################################
+nota "compilando en release (la primera vez tarda un rato)…"
+( cd "$RAIZ" && cargo build --release -p k4term -p k4term-isla ) \
+    || mal "la compilación ha fallado; mira lo de arriba."
+bien "compilado"
+
+########################################################################
+#  Los dos binarios
+########################################################################
+#  Son dos porque son dos cosas: `k4term` es la ventana, y `k4term-isla` es
+#  la misma sesión sin ventana, la que sirve la rejilla a la barra. La barra
+#  arranca el segundo por su cuenta, así que tiene que estar en el PATH.
+mkdir -p "$BIN"
+for prog in k4term k4term-isla; do
+    origen="$RAIZ/target/release/$prog"
+    [ -x "$origen" ] || mal "no se ha generado $origen"
+    rm -f "$BIN/$prog"
+    if [ "$ENLACE" -eq 1 ]; then
+        ln -s "$origen" "$BIN/$prog"
+    else
+        cp "$origen" "$BIN/$prog"
+    fi
+done
+if [ "$ENLACE" -eq 1 ]; then
+    bien "enlazados en $BIN (apuntan a target/release)"
+else
+    bien "instalados en $BIN"
+fi
+
+case ":$PATH:" in
+    *":$BIN:"*) ;;
+    *) aviso "$BIN no está en tu PATH: añádelo o no se encontrará k4term." ;;
+esac
+
+########################################################################
+#  El icono
+########################################################################
+#  A todos los tamaños y no solo a uno grande: quien lo pinta a 16 px es la
+#  lista de ventanas, y un 512 reescalado ahí se deshace.
+if [ -f "$RAIZ/assets/k4term-512.png" ]; then
+    for lado in $LADOS; do
+        destino="$ICONOS/${lado}x${lado}/apps"
+        mkdir -p "$destino"
+        cp "$RAIZ/assets/k4term-$lado.png" "$destino/k4term.png"
+    done
+    bien "icono instalado"
+else
+    aviso "faltan los PNG del icono: genéralos con python3 assets/icono.py"
+fi
+
+########################################################################
+#  La entrada de escritorio
+########################################################################
+#  `StartupWMClass` tiene que ser el mismo app_id que pide la ventana, o el
+#  compositor no sabe que esa ventana es esta aplicación y la lista de tareas
+#  la enseña sin icono y sin nombre.
+mkdir -p "$APPS"
+cat > "$APPS/k4term.desktop" <<'FIN'
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=k4term
+GenericName=Terminal
+Comment=La terminal de la casa k4
+Exec=k4term
+Icon=k4term
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;prompt;command;commandline;cmd;terminal;consola;
+StartupNotify=true
+StartupWMClass=k4term
+X-TerminalArgExec=-e
+X-TerminalArgDir=-d
+FIN
+bien "entrada de escritorio en $APPS"
+
+#  Refrescar las cachés, si el sistema las tiene. No son obligatorias: sin
+#  ellas la entrada aparece igual, solo que puede tardar en salir.
+command -v update-desktop-database >/dev/null 2>&1 \
+    && update-desktop-database -q "$APPS" 2>/dev/null || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 \
+    && gtk-update-icon-cache -qtf "$ICONOS" 2>/dev/null || true
+
+########################################################################
+#  Lo que queda en tus manos
+########################################################################
+printf '\n'
+nota "Falta lo que no puedo tocar yo, que es tu shell:"
+nota ""
+nota "  zsh   echo 'source $RAIZ/integracion/k4term.zsh' >> ~/.zshrc"
+nota "  fish  echo 'source $RAIZ/integracion/k4term.fish' >> ~/.config/fish/config.fish"
+nota ""
+nota "Sin eso k4term funciona, pero la barra no se entera de qué mandato"
+nota "estás corriendo ni cuánto lleva: eso lo cuenta la shell por OSC."
+printf '\n'
