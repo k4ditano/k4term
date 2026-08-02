@@ -2091,15 +2091,15 @@ impl Render for TerminalView {
             self.pending_refresh = false;
         }
 
+        //  El título solo se toca cuando la sesión anuncia uno (OSC 0/2): el
+        //  inicial lo pone el anfitrión en sus WindowOptions y no hay por qué
+        //  machacárselo con un genérico.
         if self.session.window_title_updates_enabled() {
-            let title = self
-                .session
-                .title()
-                .unwrap_or("GPUI Embedded Terminal (Ghostty VT)");
-
-            if self.last_window_title.as_deref() != Some(title) {
-                window.set_window_title(title);
-                self.last_window_title = Some(title.to_string());
+            if let Some(title) = self.session.title() {
+                if self.last_window_title.as_deref() != Some(title) {
+                    window.set_window_title(title);
+                    self.last_window_title = Some(title.to_string());
+                }
             }
         }
 

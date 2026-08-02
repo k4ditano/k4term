@@ -15,7 +15,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use gpui::{App, AppContext, Application, KeyBinding, WindowOptions};
+use gpui::{App, AppContext, Application, KeyBinding, TitlebarOptions, WindowOptions};
 use gpui_ghostty_terminal::view::{Copy, Paste, SelectAll, TerminalInput, TerminalView};
 use gpui_ghostty_terminal::{TerminalConfig, TerminalSession};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -40,7 +40,18 @@ fn main() {
             KeyBinding::new("ctrl-shift-v", Paste, None),
         ]);
 
-        cx.open_window(WindowOptions::default(), |window, cx| {
+        let opciones = WindowOptions {
+            // Con nombre y apellidos: sin app_id la ventana sale con clase
+            // vacía y ni Hyprland ni nadie puede dirigirse a ella.
+            app_id: Some("k4term".to_string()),
+            titlebar: Some(TitlebarOptions {
+                title: Some("k4term".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        cx.open_window(opciones, |window, cx| {
             let config = TerminalConfig::default();
 
             let pty_system = native_pty_system();
@@ -55,9 +66,29 @@ fn main() {
 
             let master: Arc<dyn portable_pty::MasterPty + Send> = Arc::from(pty_pair.master);
 
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-            let mut cmd = CommandBuilder::new(shell);
-            cmd.arg("-l");
+            //  `k4term -e prog args…` ejecuta eso en vez de la shell — el
+            //  contrato de kitty que la barra ya habla (yay -Syu, instalador).
+            let argv: Vec<String> = std::env::args().collect();
+            let ejecutar: Option<Vec<String>> = argv
+                .iter()
+                .position(|a| a == "-e")
+                .map(|i| argv[i + 1..].to_vec())
+                .filter(|resto| !resto.is_empty());
+
+            let mut cmd = match &ejecutar {
+                Some(resto) => {
+                    let mut c = CommandBuilder::new(&resto[0]);
+                    c.args(&resto[1..]);
+                    c
+                }
+                None => {
+                    let shell =
+                        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+                    let mut c = CommandBuilder::new(shell);
+                    c.arg("-l");
+                    c
+                }
+            };
             cmd.env("TERM", "xterm-256color");
             cmd.env("COLORTERM", "truecolor");
             cmd.env("TERM_PROGRAM", "k4term");
@@ -72,6 +103,9 @@ fn main() {
 
             thread::spawn(move || {
                 let _ = child.wait();
+                // Muere la shell (o el mandato de -e), muere la ventana: el
+                // contrato de toda terminal.
+                std::process::exit(0);
             });
 
             let mut pty_reader = master.try_clone_reader().expect("lector del pty");
