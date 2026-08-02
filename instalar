@@ -213,6 +213,53 @@ command -v gtk-update-icon-cache >/dev/null 2>&1 \
     && gtk-update-icon-cache -qtf "$ICONOS" 2>/dev/null || true
 
 ########################################################################
+#  Los ajustes
+########################################################################
+#  Un fichero de ejemplo, con todo comentado y los valores de fábrica a la
+#  vista. No cambia nada —todo lo que va con almohadilla es lo que ya hace—,
+#  pero es la diferencia entre poder configurarlo y enterarse de que se puede:
+#  sin él, la única pista de que existen estas cuatro claves está en el código.
+#
+#  Si ya hay uno, no se toca. Es tuyo.
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/k4term/k4term.conf"
+if [ -f "$CONF" ]; then
+    nota "tus ajustes siguen en $CONF"
+else
+    mkdir -p "$(dirname "$CONF")"
+    cat > "$CONF" <<'FIN'
+#  Ajustes de k4term.
+#
+#  Se leen al abrir y se siguen en caliente: al guardar este fichero, las
+#  ventanas ya abiertas se enteran. Lo que no se diga se queda de fábrica,
+#  así que puedes borrar lo que no te interese en vez de dejarlo puesto.
+#
+#  Con la barra k4 delante no hace falta editarlo a mano: lo mismo está en
+#  Ajustes → Terminal, y lo que se toca ahí se escribe aquí línea a línea,
+#  sin llevarse por delante tus comentarios.
+
+# fuente    = MesloLGS Nerd Font Mono
+# tamaño    = 13
+# margen    = 12
+
+#  Cristal: 1 es opaca. Por debajo se ve lo que hay detrás.
+# opacidad  = 0.94
+#  Radio de las esquinas. 0 = que redondee el compositor, que en Hyprland ya
+#  lo hace y con el radio de tu tema.
+# radio     = 0
+
+#  El rastro que deja el cursor al moverse. `no` lo apaga; un número es
+#  cuántos fantasmas deja.
+# estela    = si
+#  Atenúa lo anterior al último mandato, para que lo de ahora destaque.
+# tranquilo = no
+
+#  Con qué arrancar. Vacío = tu $SHELL.
+# shell     = /usr/bin/fish
+FIN
+    bien "ajustes de ejemplo en $CONF"
+fi
+
+########################################################################
 #  La integración de la shell
 ########################################################################
 #  Es lo que hace que la barra sepa qué mandato corre y cuánto lleva: la

@@ -1,11 +1,26 @@
-# GPUI + Ghostty (VT) Embedded Terminal
+# k4term
 
-This repository is a minimal, pinned, and testable embedded terminal stack:
+A terminal emulator built on Ghostty's VT core and Zed's GPUI, and the house
+terminal of the [k4 bar](https://github.com/k4ditano/k4) — though it does not
+need it: without a bar in front, the bridge stays quiet and you get a plain,
+fast terminal.
+
+## Credit where it is due
+
+This is **not** a from-scratch stack. The embedding work underneath — the Zig
+build and C ABI over Ghostty's terminal core, the safe Rust wrapper, and the
+GPUI `TerminalView` with its input, selection and rendering glue — comes from
+[Xuanwo's `gpui-ghostty`](https://github.com/Xuanwo/gpui-ghostty), Apache-2.0,
+whose copyright notice this repository keeps in `LICENSE`. k4term is what got
+built on top: the two applications, the k4 bridge, and the additions to the
+embedding layer that they needed.
+
+The stack it inherits is minimal, pinned and testable:
 
 - VT parsing/state: Ghostty's terminal core (vendored as a submodule)
 - Rendering/UI: GPUI (from Zed), with a custom renderer (no Ghostty renderer reuse)
 
-## k4term
+## The two binaries
 
 On top of that stack this repo ships the terminal itself, in two binaries that
 are the same session seen two ways:
