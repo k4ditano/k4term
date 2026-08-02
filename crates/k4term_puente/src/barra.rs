@@ -71,3 +71,10 @@ pub fn avisar_fin(pid: u32, mandato: &str, salida: i32, segundos: u64) {
 pub fn limpiar(pid: u32) {
     llamar(&["limpiar", &pid.to_string()]);
 }
+
+//  «Te está esperando». Una terminal que toca la campana con la ventana sin
+//  foco casi siempre es un agente que ha terminado su turno y espera
+//  respuesta; que lo diga la isla, que es donde estás mirando.
+pub fn avisar_campana(pid: u32, titulo: &str) {
+    llamar(&["campana", &pid.to_string(), titulo]);
+}

@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use gpui::{App, AppContext, Application, KeyBinding, TitlebarOptions, WindowOptions};
 use gpui_ghostty_terminal::view::{
-    Copy, DecreaseFontSize, Find, IncreaseFontSize, Paste, ResetFontSize, SelectAll, TerminalInput,
-    TerminalView,
+    Copy, CopyLastOutput, DecreaseFontSize, Find, IncreaseFontSize, NextBlock, Paste, PreviousBlock,
+    ResetFontSize, SelectAll, TerminalInput, TerminalView, ToggleQuiet,
 };
 use gpui_ghostty_terminal::{Rgb, TerminalConfig, TerminalSession};
 use k4term_puente::{Ajustes, Aviso, Suceso, barra, osc::Escaner, tema, trabajos};
@@ -52,6 +52,13 @@ fn rgb(c: tema::Color) -> Rgb {
         g: c.g,
         b: c.b,
     }
+}
+
+//  Los límites de cada mandato, camino de la vista: allí se apuntan en
+//  coordenadas del historial para poder pintar su filete.
+enum Marca {
+    Empieza,
+    Acaba { salida: i32 },
 }
 
 struct Argumentos {
@@ -119,6 +126,12 @@ fn main() {
             KeyBinding::new("ctrl--", DecreaseFontSize, None),
             KeyBinding::new("ctrl-0", ResetFontSize, None),
             KeyBinding::new("ctrl-shift-f", Find, None),
+            //  Los bloques: saltar de prompt en prompt, llevarse la salida
+            //  del último y apagar lo viejo.
+            KeyBinding::new("ctrl-shift-up", PreviousBlock, None),
+            KeyBinding::new("ctrl-shift-down", NextBlock, None),
+            KeyBinding::new("ctrl-shift-e", CopyLastOutput, None),
+            KeyBinding::new("ctrl-shift-q", ToggleQuiet, None),
         ]);
 
         let opciones = WindowOptions {
@@ -129,6 +142,14 @@ fn main() {
                 title: Some("k4term".into()),
                 ..Default::default()
             }),
+            //  Cristal esmerilado: lo de detrás se ve borroso, que es lo más
+            //  macOS que hay. Si se pide opacidad total no se molesta al
+            //  compositor con transparencias que no hacen falta.
+            window_background: if ajustes.opacidad < 1.0 {
+                gpui::WindowBackgroundAppearance::Blurred
+            } else {
+                gpui::WindowBackgroundAppearance::Opaque
+            },
             ..Default::default()
         };
 
@@ -224,6 +245,7 @@ fn main() {
             //  los bytes pasan por aquí antes de llegar al terminal, así que
             //  se miran al vuelo y siguen intactos.
             let (campana_tx, campana_rx) = mpsc::channel::<()>();
+            let (marcas_tx, marcas_rx) = mpsc::channel::<Marca>();
             let avisos = trabajos::notificador(std::process::id());
             thread::spawn(move || {
                 let mut buf = [0u8; 8192];
@@ -241,6 +263,7 @@ fn main() {
                         match suceso {
                             Suceso::Mandato(m) => mandato = m,
                             Suceso::Comienza => {
+                                let _ = marcas_tx.send(Marca::Empieza);
                                 //  Sin integración de shell no hay nombre, y
                                 //  un indicador que no dice qué corre no vale
                                 //  para nada: mejor callarse.
@@ -251,6 +274,7 @@ fn main() {
                                 }
                             }
                             Suceso::Termina { salida } => {
+                                let _ = marcas_tx.send(Marca::Acaba { salida });
                                 let _ = avisos.send(Aviso::Acaba { salida });
                                 mandato.clear();
                             }
@@ -286,6 +310,10 @@ fn main() {
                 vista.set_font(fuente(ajustes.fuente.clone()));
                 vista.set_font_size(gpui::px(ajustes.tamano));
                 vista.set_padding(gpui::px(ajustes.margen));
+                vista.set_cristal(ajustes.opacidad, ajustes.radio);
+                if ajustes.tranquilo {
+                    vista.set_tranquilo(true, cx);
+                }
 
                 let master_para_resize = master.clone();
                 vista.set_on_resize(move |cols, rows| {
@@ -319,6 +347,8 @@ fn main() {
                         // de una animación de tinte.
                         let ultimo_tema = std::iter::from_fn(|| temas.try_recv().ok()).last();
                         let campana = std::iter::from_fn(|| campana_rx.try_recv().ok()).count() > 0;
+                        let marcas: Vec<Marca> =
+                            std::iter::from_fn(|| marcas_rx.try_recv().ok()).collect();
 
                         //  `apagando` mantiene vivo el bucle mientras dure el
                         //  destello: sin salida nueva nadie volvería a pedir
@@ -331,11 +361,18 @@ fn main() {
                         })
                         .ok();
 
-                        if batch.is_empty() && ultimo_tema.is_none() && !campana && !apagando {
+                        if batch.is_empty()
+                            && ultimo_tema.is_none()
+                            && !campana
+                            && !apagando
+                            && marcas.is_empty()
+                        {
                             continue;
                         }
 
-                        cx.update(|_, cx| {
+                        let mut avisar = false;
+                        let mut titulo = String::new();
+                        cx.update(|ventana, cx| {
                             view_for_task.update(cx, |this, cx| {
                                 if !batch.is_empty() {
                                     this.queue_output_bytes(&batch, cx);
@@ -343,12 +380,36 @@ fn main() {
                                 if let Some(t) = ultimo_tema {
                                     this.set_default_colors(rgb(t.tinta), rgb(t.fondo), cx);
                                 }
+                                //  Las marcas van DESPUÉS de tragar la salida:
+                                //  el sitio donde empieza un mandato es el que
+                                //  ocupa el cursor una vez pintado lo suyo.
+                                for marca in &marcas {
+                                    match marca {
+                                        Marca::Empieza => this.empieza_bloque(cx),
+                                        Marca::Acaba { salida } => {
+                                            this.acaba_bloque(*salida, cx)
+                                        }
+                                    }
+                                }
                                 if campana {
                                     this.tocar_campana(cx);
+                                    //  Con la ventana delante ya lo estás
+                                    //  viendo; el aviso es para cuando no.
+                                    if !ventana.is_window_active() {
+                                        //  El título lo pone el programa que
+                                        //  corre: es lo más parecido a «quién
+                                        //  te llama» que hay sin adivinar.
+                                        avisar = true;
+                                        titulo = this.titulo_actual();
+                                    }
                                 }
                             });
                         })
                         .ok();
+
+                        if avisar {
+                            barra::avisar_campana(std::process::id(), &titulo);
+                        }
                     }
                 })
                 .detach();

@@ -21,7 +21,11 @@ actions!(
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
-        Find
+        Find,
+        PreviousBlock,
+        NextBlock,
+        CopyLastOutput,
+        ToggleQuiet
     ]
 );
 
@@ -260,6 +264,21 @@ pub struct TerminalView {
     busqueda: Option<Busqueda>,
     //  Hasta cuándo dura el destello de la campana.
     campana_hasta: Option<std::time::Instant>,
+    //  Los mandatos que han pasado por aquí, en coordenadas del historial.
+    bloques: Vec<Bloque>,
+    tranquilo: bool,
+    opacidad: f32,
+    radio: f32,
+}
+
+//  Un mandato: dónde empezó, dónde acabó y con qué código. Las filas van en
+//  coordenadas del historial y no de la pantalla, que es lo único que
+//  sobrevive a que la salida siga subiendo.
+#[derive(Debug, Clone, Copy)]
+pub struct Bloque {
+    pub inicio: u32,
+    pub fin: Option<u32>,
+    pub salida: Option<i32>,
 }
 
 //  Buscar en el historial: el patrón que se teclea, las filas donde aparece
@@ -316,6 +335,10 @@ impl TerminalView {
             font_size_base: None,
             busqueda: None,
             campana_hasta: None,
+            bloques: Vec::new(),
+            tranquilo: false,
+            opacidad: 1.0,
+            radio: 0.,
         }
         .with_refreshed_viewport()
     }
@@ -365,6 +388,10 @@ impl TerminalView {
             font_size_base: None,
             busqueda: None,
             campana_hasta: None,
+            bloques: Vec::new(),
+            tranquilo: false,
+            opacidad: 1.0,
+            radio: 0.,
         }
         .with_refreshed_viewport()
     }
@@ -385,6 +412,13 @@ impl TerminalView {
     // elemento ya acolchado, así que cols/rows se descuentan solos.
     pub fn set_padding(&mut self, padding: Pixels) {
         self.padding = padding;
+    }
+
+    //  Cristal: cuánto deja pasar el fondo, y con cuánto radio se recorta la
+    //  lámina. Con 1 y 0 se comporta como una ventana opaca de toda la vida.
+    pub fn set_cristal(&mut self, opacidad: f32, radio: f32) {
+        self.opacidad = opacidad.clamp(0.2, 1.0);
+        self.radio = radio.clamp(0., 40.);
     }
 
     //  El tamaño de letra de partida. Se recuerda aparte para que «volver al
@@ -434,6 +468,143 @@ impl TerminalView {
             self.invalidate_layout();
             cx.notify();
         }
+    }
+
+    // ── bloques de mandato ────────────────────────────────────────
+    //
+    //  Quien lee los marcadores es el anfitrión —los ve pasar en el chorro
+    //  del PTY antes que nadie— y aquí solo se apuntan, en coordenadas del
+    //  historial, para poder pintarlos donde toque aunque la salida siga
+    //  subiendo.
+
+    pub fn empieza_bloque(&mut self, cx: &mut Context<Self>) {
+        let Some(fila) = self.fila_absoluta_del_cursor() else {
+            return;
+        };
+        //  Un tope generoso: son doce bytes por bloque y así una sesión de
+        //  semanas no se come la memoria por apuntar mandatos.
+        if self.bloques.len() > 2000 {
+            self.bloques.drain(..500);
+        }
+        self.bloques.push(Bloque {
+            inicio: fila,
+            fin: None,
+            salida: None,
+        });
+        cx.notify();
+    }
+
+    pub fn acaba_bloque(&mut self, salida: i32, cx: &mut Context<Self>) {
+        let fila = self.fila_absoluta_del_cursor();
+        if let Some(b) = self.bloques.last_mut() {
+            if b.fin.is_none() {
+                b.fin = fila;
+                b.salida = Some(salida);
+                cx.notify();
+            }
+        }
+    }
+
+    fn fila_absoluta_del_cursor(&self) -> Option<u32> {
+        let (arriba, _) = self.session.viewport_position()?;
+        let (_, fila) = self.session.cursor_position()?;
+        Some(arriba + fila.saturating_sub(1) as u32)
+    }
+
+    //  Atenuar todo lo anterior al último mandato. En una sesión larga con un
+    //  agente, saber dónde empieza lo nuevo vale más que cualquier color.
+    //  Lo que la sesión dice que está pasando; el anfitrión lo usa para decir
+    //  quién llama cuando suena la campana.
+    pub fn titulo_actual(&self) -> String {
+        self.session.title().unwrap_or("k4term").to_string()
+    }
+
+    pub fn set_tranquilo(&mut self, valor: bool, cx: &mut Context<Self>) {
+        self.tranquilo = valor;
+        cx.notify();
+    }
+
+    fn on_toggle_quiet(&mut self, _: &ToggleQuiet, _window: &mut Window, cx: &mut Context<Self>) {
+        self.tranquilo = !self.tranquilo;
+        cx.notify();
+    }
+
+    //  Saltar de un prompt al anterior o al siguiente: en una sesión larga es
+    //  la diferencia entre buscar y encontrar.
+    fn on_previous_block(
+        &mut self,
+        _: &PreviousBlock,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.saltar_bloque(true, cx);
+    }
+
+    fn on_next_block(&mut self, _: &NextBlock, _window: &mut Window, cx: &mut Context<Self>) {
+        self.saltar_bloque(false, cx);
+    }
+
+    fn saltar_bloque(&mut self, hacia_atras: bool, cx: &mut Context<Self>) {
+        let Some((arriba, _)) = self.session.viewport_position() else {
+            return;
+        };
+        let destino = if hacia_atras {
+            self.bloques
+                .iter()
+                .rev()
+                .find(|b| b.inicio < arriba)
+                .map(|b| b.inicio)
+        } else {
+            self.bloques
+                .iter()
+                .find(|b| b.inicio > arriba)
+                .map(|b| b.inicio)
+        };
+        let Some(destino) = destino else {
+            return;
+        };
+
+        let _ = self.session.scroll_viewport_top();
+        let _ = self.session.scroll_viewport(destino as i32);
+        self.sync_viewport_scroll_tracking();
+        self.refresh_viewport();
+        cx.notify();
+    }
+
+    //  Copiar la salida del último mandato: la que se pega en el chat cuando
+    //  algo ha fallado, que es el 90 % de los copiados de una terminal.
+    fn on_copy_last_output(
+        &mut self,
+        _: &CopyLastOutput,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(bloque) = self.bloques.last().copied() else {
+            return;
+        };
+        //  Del principio del mandato al final, o hasta donde esté el cursor
+        //  si todavía está corriendo.
+        let hasta = bloque
+            .fin
+            .or_else(|| self.fila_absoluta_del_cursor())
+            .unwrap_or(bloque.inicio);
+
+        let mut texto = String::new();
+        for fila in bloque.inicio..=hasta {
+            if let Some(linea) = self.session.dump_screen_row(fila) {
+                texto.push_str(linea.trim_end());
+                texto.push('\n');
+            }
+        }
+        let texto = texto.trim_end().to_string();
+        if texto.is_empty() {
+            return;
+        }
+
+        let item = ClipboardItem::new_string(texto);
+        cx.write_to_clipboard(item.clone());
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        cx.write_to_primary(item);
     }
 
     //  La campana, vista: un destello de 120 ms sobre la pantalla. Devuelve
@@ -1609,6 +1780,98 @@ struct TerminalPrepaintState {
     marked_text: Option<(gpui::ShapedLine, gpui::Point<Pixels>)>,
     marked_text_background: Option<PaintQuad>,
     cursor: Option<PaintQuad>,
+    //  Lo de la casa: el filete de cada mandato, el velo del modo tranquilo
+    //  y la barra de desplazamiento.
+    adornos: Vec<PaintQuad>,
+}
+
+//  Los filetes, el velo y la barra. Se calculan aquí porque necesitan el alto
+//  de línea, que no se sabe hasta que la fuente está medida.
+fn adornos_de_la_casa(
+    vista: &TerminalView,
+    bounds: Bounds<Pixels>,
+    line_height: Pixels,
+    filas: usize,
+) -> Vec<PaintQuad> {
+    let mut salida = Vec::new();
+    let Some((arriba, total)) = vista.session.viewport_position() else {
+        return salida;
+    };
+
+    let y_de = |indice: usize| bounds.top() + line_height * indice as f32;
+
+    // ── el filete de cada mandato ─────────────────────────────────
+    //
+    //  Dos píxeles en el margen izquierdo: verde si salió bien, rojo si no,
+    //  apagado mientras corre. Nada hasta que significa algo.
+    for bloque in &vista.bloques {
+        let fin = bloque.fin.unwrap_or(arriba + filas as u32);
+        if fin < arriba || bloque.inicio >= arriba + filas as u32 {
+            continue;
+        }
+        let desde = bloque.inicio.max(arriba) - arriba;
+        let hasta = fin.min(arriba + filas as u32 - 1) - arriba;
+        if hasta < desde {
+            continue;
+        }
+
+        let color = match bloque.salida {
+            None => hsla(0., 0., 0.56, 0.45),          // corriendo
+            Some(0) => hsla(0.38, 0.72, 0.51, 0.85),   // verde de la casa
+            Some(_) => hsla(0.01, 1.0, 0.61, 0.85),    // rojo de la casa
+        };
+
+        salida.push(fill(
+            Bounds::new(
+                point(bounds.left() - px(8.), y_de(desde as usize)),
+                size(px(2.), line_height * (hasta - desde + 1) as f32),
+            ),
+            color,
+        ));
+    }
+
+    // ── el velo del modo tranquilo ────────────────────────────────
+    if vista.tranquilo {
+        if let Some(ultimo) = vista.bloques.last() {
+            if ultimo.inicio > arriba {
+                let hasta = (ultimo.inicio - arriba).min(filas as u32);
+                salida.push(fill(
+                    Bounds::new(
+                        point(bounds.left() - px(12.), bounds.top()),
+                        size(bounds.size.width + px(24.), line_height * hasta as f32),
+                    ),
+                    hsla(0., 0., 0., 0.55),
+                ));
+            }
+        }
+    }
+
+    // ── la barra de desplazamiento ────────────────────────────────
+    //
+    //  Fina, sin surco y solo cuando hay algo que decir: si todo cabe en la
+    //  pantalla, no aparece. Es la IslandScrollBar de la barra, aquí.
+    if total > filas as u32 {
+        let alto = bounds.size.height;
+        let proporcion = (filas as f32 / total as f32).clamp(0.04, 1.0);
+        let recorrido = (total - filas as u32) as f32;
+        let avance = if recorrido > 0.0 {
+            (arriba as f32 / recorrido).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let alto_pulgar = alto * proporcion;
+        let y = bounds.top() + (alto - alto_pulgar) * avance;
+
+        salida.push(fill(
+            Bounds::new(
+                point(bounds.right() + px(4.), y),
+                size(px(3.), alto_pulgar),
+            ),
+            hsla(0., 0., 1.0, 0.22),
+        ));
+    }
+
+    salida
 }
 
 const CELL_STYLE_FLAG_BOLD: u8 = 0x02;
@@ -2251,8 +2514,14 @@ impl Element for TerminalTextElement {
             ))
         });
 
+        let adornos = {
+            let vista = self.view.read(cx);
+            adornos_de_la_casa(vista, bounds, line_height, shaped_lines.len())
+        };
+
         TerminalPrepaintState {
             line_height,
+            adornos,
             shaped_lines,
             background_quads,
             selection_quads,
@@ -2330,6 +2599,12 @@ impl Element for TerminalTextElement {
                 window.paint_quad(quad);
             }
 
+            //  Los adornos van por encima del texto: el velo tiene que
+            //  atenuarlo, y el filete y la barra viven en los márgenes.
+            for quad in prepaint.adornos.drain(..) {
+                window.paint_quad(quad);
+            }
+
             if let Some(bg) = prepaint.marked_text_background.take() {
                 window.paint_quad(bg);
             }
@@ -2394,6 +2669,10 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::on_decrease_font_size))
             .on_action(cx.listener(Self::on_reset_font_size))
             .on_action(cx.listener(Self::on_find))
+            .on_action(cx.listener(Self::on_previous_block))
+            .on_action(cx.listener(Self::on_next_block))
+            .on_action(cx.listener(Self::on_copy_last_output))
+            .on_action(cx.listener(Self::on_toggle_quiet))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -2403,12 +2682,24 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
-            .bg(hsla_from_rgb(self.session.default_background()))
+            //  El fondo lleva la opacidad de los ajustes: con la ventana en
+            //  modo cristal, es lo que deja ver —borroso— lo que hay detrás.
+            .bg(hsla_from_rgb(self.session.default_background()).opacity(self.opacidad))
             .text_color(gpui::white())
             .font(self.font.clone())
-            .p(self.padding)
+            //  Más aire arriba que abajo, que es como respiran las terminales
+            //  de macOS, y sitio a la izquierda para el filete de los bloques.
+            .pt(self.padding + px(6.))
+            .pb(self.padding)
+            .pl(self.padding + px(8.))
+            .pr(self.padding + px(6.))
             .whitespace_nowrap()
             .relative()
+            //  Esquinas de la casa y un filo de un píxel: el truco de macOS
+            //  para que una ventana negra no se funda con un fondo oscuro.
+            .rounded(px(self.radio))
+            .border_1()
+            .border_color(hsla(0., 0., 1.0, 0.08))
             .child(TerminalTextElement { view: cx.entity() })
             .children(
                 self.campana_hasta
@@ -2433,16 +2724,35 @@ impl Render for TerminalView {
                     format!("{}/{}", b.indice + 1, total)
                 };
 
+                //  Vestida de isla: superficie de la casa, esquinas suaves,
+                //  la palabra en apagado y el contador en su pastilla azul.
                 div()
                     .absolute()
-                    .bottom_2()
-                    .right_2()
+                    .bottom_3()
+                    .right_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .bg(gpui::rgb(0x1c1c1e))
-                    .text_color(gpui::rgb(0xffffff))
-                    .child(format!("buscar: {}   {}", b.patron, cuenta))
+                    .py_1p5()
+                    .rounded(px(self.radio.max(10.)))
+                    .bg(hsla(0., 0., 0.11, 0.96))
+                    .border_1()
+                    .border_color(hsla(0., 0., 1.0, 0.08))
+                    .child(
+                        div()
+                            .text_color(hsla(0., 0., 0.56, 1.0))
+                            .child("buscar"),
+                    )
+                    .child(div().text_color(gpui::white()).child(b.patron.clone()))
+                    .child(
+                        div()
+                            .px_2()
+                            .rounded(px(8.))
+                            .bg(hsla(0.58, 1.0, 0.52, 0.22))
+                            .text_color(hsla(0.58, 1.0, 0.66, 1.0))
+                            .child(cuenta),
+                    )
             }))
     }
 }

@@ -163,6 +163,23 @@ impl Terminal {
         Ok(s)
     }
 
+    //  (fila por la que empieza lo que se ve, filas que hay en total), ambas
+    //  en coordenadas del historial completo. De aquí sale la barra de
+    //  desplazamiento y la colocación de cualquier marca apuntada en
+    //  absoluto.
+    pub fn viewport_position(&self) -> Option<(u32, u32)> {
+        let mut arriba = 0u32;
+        let mut total = 0u32;
+        let ok = unsafe {
+            ghostty_vt_sys::ghostty_vt_terminal_viewport_position(
+                self.ptr.as_ptr(),
+                &mut arriba,
+                &mut total,
+            )
+        };
+        ok.then_some((arriba, total))
+    }
+
     //  Una fila del historial entero (0 = lo más viejo que se recuerda), no
     //  solo de lo que se ve. `None` cuando esa fila ya no existe: es la
     //  forma de saber dónde acaba el historial sin preguntar el tamaño.

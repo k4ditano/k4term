@@ -307,6 +307,13 @@ impl TerminalSession {
         self.terminal.dump_viewport()
     }
 
+    //  (fila donde empieza lo que se ve, filas totales) en coordenadas del
+    //  historial. Es lo que permite pintar la barra de desplazamiento y
+    //  colocar marcas apuntadas en absoluto.
+    pub fn viewport_position(&self) -> Option<(u32, u32)> {
+        self.terminal.viewport_position()
+    }
+
     //  Una fila del historial entero, para buscar hacia atrás. `None` cuando
     //  ya no hay más: así se sabe dónde acaba sin preguntar el tamaño.
     pub fn dump_screen_row(&self, row: u32) -> Option<String> {

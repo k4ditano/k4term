@@ -64,6 +64,12 @@ bool ghostty_vt_terminal_cursor_position(ghostty_vt_terminal_t terminal,
 ghostty_vt_bytes_t ghostty_vt_terminal_dump_viewport(ghostty_vt_terminal_t terminal);
 ghostty_vt_bytes_t ghostty_vt_terminal_dump_viewport_row(ghostty_vt_terminal_t terminal,
                                                          uint16_t row);
+// Dónde empieza el mirador dentro del historial, y cuántas filas hay en
+// total. Falso si no se pudo averiguar.
+bool ghostty_vt_terminal_viewport_position(ghostty_vt_terminal_t terminal,
+                                           uint32_t* top_out,
+                                           uint32_t* total_out);
+
 // Fila del historial completo (0 = lo más antiguo que se recuerda). Vacío
 // cuando la fila no existe.
 ghostty_vt_bytes_t ghostty_vt_terminal_dump_screen_row(ghostty_vt_terminal_t terminal,

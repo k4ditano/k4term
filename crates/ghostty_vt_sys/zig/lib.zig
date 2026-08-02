@@ -339,6 +339,33 @@ export fn ghostty_vt_terminal_dump_viewport_row(
     return .{ .ptr = slice.ptr, .len = slice.len };
 }
 
+//  Dónde está el mirador dentro de todo lo que se recuerda: la fila absoluta
+//  por la que empieza lo que se ve, y cuántas filas hay en total.
+//
+//  Con esos dos números se puede pintar una barra de desplazamiento honesta,
+//  saber si hay historial por encima, y colocar en pantalla cosas que se
+//  apuntaron en coordenadas absolutas —dónde empezó un mandato, por ejemplo—
+//  que es lo que `viewport` por sí solo no permite.
+export fn ghostty_vt_terminal_viewport_position(
+    terminal_ptr: ?*anyopaque,
+    top_out: ?*u32,
+    total_out: ?*u32,
+) callconv(.C) bool {
+    if (terminal_ptr == null) return false;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
+    const pages = &handle.terminal.screen.pages;
+
+    const arriba = pages.getTopLeft(.viewport);
+    const punto = pages.pointFromPin(.screen, arriba) orelse return false;
+
+    const ultima = pages.getBottomRight(.screen) orelse return false;
+    const punto_final = pages.pointFromPin(.screen, ultima) orelse return false;
+
+    if (top_out) |p| p.* = @intCast(punto.screen.y);
+    if (total_out) |p| p.* = @intCast(punto_final.screen.y + 1);
+    return true;
+}
+
 //  Una fila del historial completo, contando desde el principio de todo lo
 //  que la terminal recuerda (no de lo que se ve). Es lo que hace falta para
 //  buscar hacia atrás: `viewport` solo llega a la pantalla de ahora.

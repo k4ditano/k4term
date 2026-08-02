@@ -61,6 +61,12 @@ unsafe extern "C" {
         row: u16,
     ) -> ghostty_vt_bytes_t;
 
+    pub fn ghostty_vt_terminal_viewport_position(
+        terminal: *mut core::ffi::c_void,
+        top_out: *mut u32,
+        total_out: *mut u32,
+    ) -> bool;
+
     pub fn ghostty_vt_terminal_dump_screen_row(
         terminal: *mut core::ffi::c_void,
         row: u32,

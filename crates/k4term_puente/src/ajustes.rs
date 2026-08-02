@@ -22,6 +22,12 @@ pub struct Ajustes {
     pub tamano: f32,
     pub margen: f32,
     pub shell: Option<String>,
+    //  Cristal: cuánto se ve de lo que hay detrás y con cuánto radio se
+    //  recorta la lámina. Con opacidad 1 se comporta como siempre.
+    pub opacidad: f32,
+    pub radio: f32,
+    //  Atenuar lo anterior al último mandato, de salida.
+    pub tranquilo: bool,
 }
 
 impl Default for Ajustes {
@@ -33,6 +39,11 @@ impl Default for Ajustes {
             tamano: 13.0,
             margen: 12.0,
             shell: None,
+            //  De fábrica, cristal suave y las esquinas de la isla: es la
+            //  cara de la casa, y quien no la quiera pone opacidad = 1.
+            opacidad: 0.94,
+            radio: 16.0,
+            tranquilo: false,
         }
     }
 }
@@ -89,6 +100,19 @@ impl Ajustes {
                     }
                 }
                 "shell" => self.shell = Some(valor.to_string()),
+                "opacidad" | "opacity" => {
+                    if let Ok(n) = valor.parse::<f32>() {
+                        self.opacidad = n.clamp(0.2, 1.0);
+                    }
+                }
+                "radio" | "radius" => {
+                    if let Ok(n) = valor.parse::<f32>() {
+                        self.radio = n.clamp(0.0, 40.0);
+                    }
+                }
+                "tranquilo" | "quiet" => {
+                    self.tranquilo = matches!(valor.to_lowercase().as_str(), "si" | "sí" | "true" | "1")
+                }
                 _ => {}
             }
         }
