@@ -71,12 +71,30 @@ enum Orden {
     Medida { cols: u16, filas: u16 },
     #[serde(rename = "pinta")]
     Pinta,
+    #[serde(rename = "donde")]
+    Donde,
 }
 
 enum Recado {
     Bytes(Vec<u8>),
     Medida { cols: u16, filas: u16 },
     Pinta,
+    Donde,
+}
+
+#[derive(Serialize)]
+struct Donde {
+    que: &'static str,
+    ruta: String,
+}
+
+//  Dónde está la sesión ahora mismo. Se le pregunta al kernel por el
+//  directorio de la shell en vez de pedirle integración a nadie: el proceso
+//  es hijo nuestro y su cwd está ahí para quien quiera mirarlo.
+fn directorio(pid: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|r| r.to_string_lossy().into_owned())
 }
 
 #[derive(Serialize)]
@@ -141,9 +159,13 @@ fn fila_en_tramos(term: &Terminal, fila: u16, fondo: &str) -> Vec<Tramo> {
     tramos
 }
 
+//  Ojo a las dos numeraciones, que no son la misma y muerden: las filas del
+//  volcado empiezan en 0, y el cursor viene en 1. Volcar desde 1 se comía la
+//  primera fila y dejaba el cursor pintado una línea por debajo de donde de
+//  verdad escribes.
 fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str) -> Marco {
     let mut salida = Vec::with_capacity(filas as usize);
-    for f in 1..=filas {
+    for f in 0..filas {
         salida.push(fila_en_tramos(term, f, fondo));
     }
     let (col, fila) = term.cursor_position().unwrap_or((1, 1));
@@ -158,7 +180,7 @@ fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str) -> Marco {
 
 //  El dueño del VT. Nadie más lo toca: le llegan recados, decide cuándo la
 //  pantalla está lo bastante quieta y manda la foto.
-fn motor(rx: std::sync::mpsc::Receiver<Recado>) {
+fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32) {
     let mut term = match Terminal::new(COLS, FILAS) {
         Ok(t) => t,
         Err(_) => return,
@@ -218,6 +240,14 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>) {
                 sucio = true;
                 desde.get_or_insert_with(Instant::now);
             }
+            Ok(Recado::Donde) => {
+                let ruta = directorio(pid_shell).unwrap_or_default();
+                if let Ok(json) = serde_json::to_string(&Donde { que: "donde", ruta }) {
+                    let mut s = salida.lock();
+                    let _ = writeln!(s, "{}", json);
+                    let _ = s.flush();
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -262,9 +292,10 @@ fn main() {
     }
 
     let mut hijo = par.slave.spawn_command(cmd).expect("no arrancó la shell");
+    let pid_shell = hijo.process_id().unwrap_or(0);
 
     let (tx, rx) = channel::<Recado>();
-    thread::spawn(move || motor(rx));
+    thread::spawn(move || motor(rx, pid_shell));
 
     // ── el PTY habla ──────────────────────────────────────────────
     {
@@ -331,6 +362,9 @@ fn main() {
                 }
                 Orden::Pinta => {
                     let _ = tx.send(Recado::Pinta);
+                }
+                Orden::Donde => {
+                    let _ = tx.send(Recado::Donde);
                 }
             }
         }
