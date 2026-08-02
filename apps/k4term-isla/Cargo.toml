@@ -1,0 +1,17 @@
+[package]
+name = "k4term-isla"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[[bin]]
+name = "k4term-isla"
+path = "src/main.rs"
+
+[dependencies]
+ghostty_vt = { path = "../../crates/ghostty_vt" }
+k4term_puente = { path = "../../crates/k4term_puente" }
+portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

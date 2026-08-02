@@ -2699,6 +2699,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "k4term-isla"
+version = "0.1.0"
+dependencies = [
+ "ghostty_vt",
+ "k4term_puente",
+ "portable-pty",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "k4term_puente"
 version = "0.1.0"
 dependencies = [
