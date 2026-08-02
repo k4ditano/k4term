@@ -83,12 +83,23 @@ enum Recado {
     Pinta,
     Donde,
     Rueda { lineas: i32 },
+    Ajustes { estela: u8 },
 }
 
 #[derive(Serialize)]
 struct Donde {
     que: &'static str,
     ruta: String,
+}
+
+//  Lo que la vista necesita saber de los ajustes de k4term. Se le manda desde
+//  aquí en vez de dejar que la barra lea el fichero por su cuenta: los
+//  ajustes son de la terminal, y con dos lectores acabaría habiendo dos
+//  formatos y una ventana y una isla que no se parecen.
+#[derive(Serialize)]
+struct Config {
+    que: &'static str,
+    estela: u8,
 }
 
 //  Dónde está la sesión ahora mismo. Se le pregunta al kernel por el
@@ -207,6 +218,17 @@ fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str, cwd: String) -> Ma
     }
 }
 
+fn decir_config(salida: &std::io::Stdout, estela: u8) {
+    if let Ok(json) = serde_json::to_string(&Config {
+        que: "config",
+        estela,
+    }) {
+        let mut s = salida.lock();
+        let _ = writeln!(s, "{}", json);
+        let _ = s.flush();
+    }
+}
+
 //  El dueño del VT. Nadie más lo toca: le llegan recados, decide cuándo la
 //  pantalla está lo bastante quieta y manda la foto.
 //  El directorio se mira al pintar y no en cada byte: es una lectura de
@@ -242,6 +264,11 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32) {
     let mut desde: Option<Instant> = None;
     let salida = std::io::stdout();
 
+    //  Los ajustes van por delante del primer marco: si llegaran después, la
+    //  vista pintaría el primer cursor con la estela de fábrica y la
+    //  corregiría a la vista del usuario.
+    decir_config(&salida, k4term_puente::Ajustes::leer().estela);
+
     loop {
         let recado = if sucio {
             rx.recv_timeout(REPOSO)
@@ -276,6 +303,9 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32) {
                 let _ = term.scroll_viewport(lineas);
                 sucio = true;
                 desde.get_or_insert_with(Instant::now);
+            }
+            Ok(Recado::Ajustes { estela }) => {
+                decir_config(&salida, estela);
             }
             Ok(Recado::Donde) => {
                 let ruta = directorio(pid_shell).unwrap_or_default();
@@ -338,6 +368,28 @@ fn main() {
 
     let (tx, rx) = channel::<Recado>();
     thread::spawn(move || motor(rx, pid_shell));
+
+    // ── los ajustes, en caliente ──────────────────────────────────
+    //
+    //  El mismo fichero que la ventana y vigilado igual, para que tocar la
+    //  estela una vez se vea en las dos. Sin esto la isla se quedaría con lo
+    //  que hubiera al arrancar la barra, que puede ser de hace días.
+    {
+        let tx: Sender<Recado> = tx.clone();
+        thread::spawn(move || {
+            let rx_ajustes = k4term_puente::ajustes::vigilar();
+            while let Ok(ajustes) = rx_ajustes.recv() {
+                if tx
+                    .send(Recado::Ajustes {
+                        estela: ajustes.estela,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
 
     // ── el PTY habla ──────────────────────────────────────────────
     {

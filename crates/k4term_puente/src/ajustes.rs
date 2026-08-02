@@ -89,8 +89,21 @@ pub fn vigilar() -> std::sync::mpsc::Receiver<Ajustes> {
             return;
         }
 
+        //  Solo lo que CAMBIA el fichero. Sin este filtro el vigía se
+        //  realimenta: leer los ajustes genera un aviso de acceso sobre la
+        //  misma ruta, que hace releer, que genera otro aviso… y el hilo se
+        //  queda dando vueltas a toda velocidad para siempre. No se nota
+        //  mirando la ventana —releer y aplicar lo mismo no cambia nada— pero
+        //  está ahí quemando un núcleo, y en la isla salta a la vista porque
+        //  cada vuelta manda una línea por la salida.
         while let Ok(suceso) = rx_fs.recv() {
             let Ok(suceso) = suceso else { continue };
+            if !matches!(
+                suceso.kind,
+                notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Any
+            ) {
+                continue;
+            }
             if !suceso.paths.iter().any(|p| p == &ruta) {
                 continue;
             }

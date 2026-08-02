@@ -2708,23 +2708,32 @@ impl Element for TerminalTextElement {
                 //  guarda aquí y no se calcula al pintar porque lo que se
                 //  quiere enseñar es el camino real, con su aceleración.
                 if vista.estela_largo > 0 {
-                    if !quieto || !vista.cursor_estela.is_empty() {
+                    if quieto {
+                        //  Parado, la estela se recoge sola: un fantasma
+                        //  menos por fotograma hasta vaciarse.
+                        //
+                        //  Ojo a lo que había antes aquí, que parecía lo
+                        //  mismo: apuntar TAMBIÉN la posición quieta y quitar
+                        //  el más viejo. Eso deja la lista clavada en su
+                        //  largo, con todos los fantasmas amontonados bajo el
+                        //  cursor —invisibles, pero ahí—, y `cursor_moviendose`
+                        //  no vuelve a ser falso jamás: la terminal se queda
+                        //  pidiendo fotogramas para siempre con la pantalla
+                        //  parada. Con la comprobación delante, que quieto y
+                        //  sin estela es el caso de siempre y sin ella se
+                        //  caía al abrir.
+                        if !vista.cursor_estela.is_empty() {
+                            vista.cursor_estela.remove(0);
+                        }
+                    } else {
                         vista.cursor_estela.push(anterior);
-                    }
-                    let sobran = vista
-                        .cursor_estela
-                        .len()
-                        .saturating_sub(vista.estela_largo as usize);
-                    if sobran > 0 {
-                        vista.cursor_estela.drain(..sobran);
-                    }
-                    //  Parado, la estela se recoge sola en unos pocos
-                    //  fotogramas en vez de quedarse ahí colgada. Con la
-                    //  comprobación delante: quieto y sin estela es el caso
-                    //  de siempre —el cursor parpadeando en el prompt— y sin
-                    //  ella la terminal se caía al abrir.
-                    if quieto && !vista.cursor_estela.is_empty() {
-                        vista.cursor_estela.remove(0);
+                        let sobran = vista
+                            .cursor_estela
+                            .len()
+                            .saturating_sub(vista.estela_largo as usize);
+                        if sobran > 0 {
+                            vista.cursor_estela.drain(..sobran);
+                        }
                     }
                 }
 
