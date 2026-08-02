@@ -29,21 +29,78 @@ aviso() { printf '  \033[33m!\033[0m %s\n' "$1"; }
 mal()   { printf '  \033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
 bien()  { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 
+#  La línea que se mete en tu configuración de shell. Lleva marca propia
+#  para poder quitarla luego sin adivinar: se busca la marca y se borra ella
+#  y la de debajo, que es todo lo que este guion escribe ahí.
+MARCA='#  k4term: integración de la shell (la pone y la quita ./instalar)'
+
+#  Qué shells sabemos integrar y dónde. Se mira SI EXISTE el fichero, no cuál
+#  es tu $SHELL: es normal tener el login en una shell y usar otra en el
+#  terminal, y en ese caso integrar solo una deja la mitad a medias.
+para_cada_shell() {
+    accion=$1
+    "$accion" zsh  "$HOME/.zshrc"                  "$RAIZ/integracion/k4term.zsh"
+    "$accion" fish "$HOME/.config/fish/config.fish" "$RAIZ/integracion/k4term.fish"
+}
+
+integrar_una() {
+    nombre=$1; rc=$2; guion=$3
+    [ -f "$rc" ] || return 0
+    [ -f "$guion" ] || return 0
+
+    if grep -qF "$guion" "$rc" 2>/dev/null; then
+        bien "$nombre ya estaba integrada"
+        return 0
+    fi
+
+    cp "$rc" "$rc.k4.bak"
+    {
+        printf '\n%s\n' "$MARCA"
+        printf 'source %s\n' "$guion"
+    } >> "$rc"
+    bien "$nombre integrada (copia de lo de antes en $rc.k4.bak)"
+}
+
+desintegrar_una() {
+    nombre=$1; rc=$2; guion=$3
+    [ -f "$rc" ] || return 0
+    grep -qF "$guion" "$rc" 2>/dev/null || return 0
+
+    cp "$rc" "$rc.k4.bak"
+    #  La marca, la línea de debajo y el blanco que las separaba de lo tuyo:
+    #  si no, cada instalar/quitar te deja un hueco más en la configuración.
+    #  Por eso los blancos se retienen en vez de imprimirse al vuelo.
+    #
+    #  Con awk y no con `sed -i` porque el rango `/marca/,+1` es de GNU y
+    #  este guion es sh a secas.
+    awk -v m="$MARCA" '
+        BEGIN { pend = 0; saltar = 0 }
+        saltar > 0        { saltar--; next }
+        /^[ \t]*$/        { pend++; next }
+        $0 == m           { if (pend > 0) pend--; suelta(); saltar = 1; next }
+                          { suelta(); print }
+        END               { suelta() }
+        function suelta() { while (pend-- > 0) print ""; pend = 0 }
+    ' "$rc" > "$rc.k4.nuevo" && mv "$rc.k4.nuevo" "$rc"
+    bien "$nombre desintegrada"
+}
+
 quitar() {
     rm -f "$BIN/k4term" "$BIN/k4term-isla" "$APPS/k4term.desktop"
     for lado in $LADOS; do
         rm -f "$ICONOS/${lado}x${lado}/apps/k4term.png"
     done
     bien "quitado de $BIN, $APPS y $ICONOS"
-    nota "La integración de la shell, si la pusiste, sigue en tu ~/.zshrc"
-    nota "o ~/.config/fish/config.fish: quítala tú, que es tuya."
+    para_cada_shell desintegrar_una
     exit 0
 }
 
 ENLACE=0
+SHELL_TAMBIEN=1
 for arg in "$@"; do
     case "$arg" in
         --enlace) ENLACE=1 ;;
+        --sin-shell) SHELL_TAMBIEN=0 ;;
         --quitar) quitar ;;
         *) mal "no conozco la opción $arg" ;;
     esac
@@ -156,14 +213,17 @@ command -v gtk-update-icon-cache >/dev/null 2>&1 \
     && gtk-update-icon-cache -qtf "$ICONOS" 2>/dev/null || true
 
 ########################################################################
-#  Lo que queda en tus manos
+#  La integración de la shell
 ########################################################################
-printf '\n'
-nota "Falta lo que no puedo tocar yo, que es tu shell:"
-nota ""
-nota "  zsh   echo 'source $RAIZ/integracion/k4term.zsh' >> ~/.zshrc"
-nota "  fish  echo 'source $RAIZ/integracion/k4term.fish' >> ~/.config/fish/config.fish"
-nota ""
-nota "Sin eso k4term funciona, pero la barra no se entera de qué mandato"
-nota "estás corriendo ni cuánto lleva: eso lo cuenta la shell por OSC."
+#  Es lo que hace que la barra sepa qué mandato corre y cuánto lleva: la
+#  shell lo cuenta por OSC y sin esto k4term funciona, pero la isla no se
+#  entera de nada. Se pone sola porque no ponerla es dejar la instalación a
+#  medias; con --sin-shell no se toca nada tuyo.
+if [ "$SHELL_TAMBIEN" -eq 1 ]; then
+    para_cada_shell integrar_una
+    nota "abre una shell nueva para que tenga efecto"
+else
+    aviso "sin tocar tu shell: la barra no sabrá qué mandato estás corriendo"
+fi
+
 printf '\n'
