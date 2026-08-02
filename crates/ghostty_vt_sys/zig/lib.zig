@@ -201,6 +201,157 @@ const Handler = struct {
             else => {},
         }
     }
+
+    //  ────────────────────────────────────────────────────────────────────
+    //  El resto del repertorio.
+    //
+    //  Ojo a cómo despacha ghostty: su Stream mira con `@hasDecl` si este
+    //  Handler declara el método, y si no está NO PASA NADA — la secuencia se
+    //  descarta en silencio. O sea que una función que falta aquí no da error
+    //  ni aviso: simplemente el terminal se comporta mal y a saber por qué.
+    //
+    //  Así se coló lo de guardar y restaurar el cursor, que es lo que usa zsh
+    //  para redibujar el prompt: sin `restoreCursor` el cursor no volvía a la
+    //  columna 1, la marca de fin de línea de zsh se quedaba escrita, y cada
+    //  sesión empezaba con un `%` y una línea de más.
+    //
+    //  Van todos delegados igual que en el propio ghostty (su
+    //  src/termio/stream_handler.zig), que es la referencia de qué hace cada
+    //  uno; lo que no se declare aquí seguirá cayendo al vacío.
+
+    pub fn saveCursor(self: *Handler) !void {
+        self.terminal.saveCursor();
+    }
+
+    pub fn restoreCursor(self: *Handler) !void {
+        try self.terminal.restoreCursor();
+    }
+
+    //  Los saltos de línea con región de desplazamiento: lo que usan vim,
+    //  less y cualquier cosa que pinte una pantalla entera.
+    pub fn index(self: *Handler) !void {
+        try self.terminal.index();
+    }
+
+    pub fn nextLine(self: *Handler) !void {
+        try self.terminal.index();
+        self.terminal.carriageReturn();
+    }
+
+    pub fn reverseIndex(self: *Handler) !void {
+        self.terminal.reverseIndex();
+    }
+
+    pub fn setTopAndBottomMargin(self: *Handler, top: u16, bot: u16) !void {
+        self.terminal.setTopAndBottomMargin(top, bot);
+    }
+
+    pub fn setLeftAndRightMargin(self: *Handler, left: u16, right: u16) !void {
+        self.terminal.setLeftAndRightMargin(left, right);
+    }
+
+    //  Sin argumentos la secuencia es ambigua: es margen izquierdo/derecho si
+    //  ese modo está activo, y guardar el cursor si no. Lo dice el estándar y
+    //  no es una manía de ghostty.
+    pub fn setLeftAndRightMarginAmbiguous(self: *Handler) !void {
+        if (self.terminal.modes.get(.enable_left_and_right_margin)) {
+            self.terminal.setLeftAndRightMargin(0, 0);
+        } else {
+            self.terminal.saveCursor();
+        }
+    }
+
+    pub fn scrollUp(self: *Handler, count: usize) !void {
+        self.terminal.scrollUp(count);
+    }
+
+    pub fn scrollDown(self: *Handler, count: usize) !void {
+        self.terminal.scrollDown(count);
+    }
+
+    pub fn insertLines(self: *Handler, count: usize) !void {
+        self.terminal.insertLines(count);
+    }
+
+    pub fn deleteLines(self: *Handler, count: usize) !void {
+        self.terminal.deleteLines(count);
+    }
+
+    pub fn insertBlanks(self: *Handler, count: usize) !void {
+        self.terminal.insertBlanks(count);
+    }
+
+    pub fn deleteChars(self: *Handler, count: usize) !void {
+        self.terminal.deleteChars(count);
+    }
+
+    pub fn eraseChars(self: *Handler, count: usize) !void {
+        self.terminal.eraseChars(count);
+    }
+
+    pub fn printRepeat(self: *Handler, count: usize) !void {
+        try self.terminal.printRepeat(count);
+    }
+
+    pub fn setCursorColRelative(self: *Handler, offset: u16) !void {
+        self.terminal.setCursorPos(
+            self.terminal.screen.cursor.y + 1,
+            self.terminal.screen.cursor.x + 1 +| offset,
+        );
+    }
+
+    pub fn setCursorRowRelative(self: *Handler, offset: u16) !void {
+        self.terminal.setCursorPos(
+            self.terminal.screen.cursor.y + 1 +| offset,
+            self.terminal.screen.cursor.x + 1,
+        );
+    }
+
+    //  Las tabulaciones. `horizontalTabBack` corta cuando el cursor deja de
+    //  moverse: si no, en la primera columna se queda dando vueltas.
+    pub fn tabSet(self: *Handler) !void {
+        self.terminal.tabSet();
+    }
+
+    pub fn tabReset(self: *Handler) !void {
+        self.terminal.tabReset();
+    }
+
+    pub fn tabClear(self: *Handler, cmd: terminal.TabClear) !void {
+        self.terminal.tabClear(cmd);
+    }
+
+    pub fn horizontalTabBack(self: *Handler, count: u16) !void {
+        for (0..count) |_| {
+            const x = self.terminal.screen.cursor.x;
+            try self.terminal.horizontalTabBack();
+            if (x == self.terminal.screen.cursor.x) break;
+        }
+    }
+
+    pub fn setProtectedMode(self: *Handler, mode: terminal.ProtectedMode) !void {
+        self.terminal.setProtectedMode(mode);
+    }
+
+    pub fn decaln(self: *Handler) !void {
+        try self.terminal.decaln();
+    }
+
+    pub fn fullReset(self: *Handler) !void {
+        self.terminal.fullReset();
+    }
+
+    pub fn saveMode(self: *Handler, mode: terminal.Mode) !void {
+        self.terminal.modes.save(mode);
+    }
+
+    //  Restaurar pasa por `setMode` a propósito: hay modos con efectos —el
+    //  cambio de pantalla, sin ir más lejos— que no se disparan con solo
+    //  escribir el bit.
+    pub fn restoreMode(self: *Handler, mode: terminal.Mode) !void {
+        const v = self.terminal.modes.restore(mode);
+        try self.setMode(mode, v);
+    }
 };
 
 export fn ghostty_vt_terminal_new(cols: u16, rows: u16) callconv(.C) ?*anyopaque {
