@@ -275,6 +275,9 @@ pub struct TerminalView {
     //  dónde está: entre los dos sitios hay una animación.
     cursor_pintado: Option<gpui::Point<Pixels>>,
     cursor_moviendose: bool,
+    //  Por dónde acaba de pasar el cursor, para la estela.
+    cursor_estela: Vec<gpui::Point<Pixels>>,
+    estela_largo: u8,
     //  El depósito de chispa de la barra, seco.
     seco: bool,
 }
@@ -349,6 +352,8 @@ impl TerminalView {
             radio: 0.,
             cursor_pintado: None,
             cursor_moviendose: false,
+            cursor_estela: Vec::new(),
+            estela_largo: 0,
             seco: false,
         }
         .with_refreshed_viewport()
@@ -405,6 +410,8 @@ impl TerminalView {
             radio: 0.,
             cursor_pintado: None,
             cursor_moviendose: false,
+            cursor_estela: Vec::new(),
+            estela_largo: 0,
             seco: false,
         }
         .with_refreshed_viewport()
@@ -430,6 +437,14 @@ impl TerminalView {
 
     //  Cristal: cuánto deja pasar el fondo, y con cuánto radio se recorta la
     //  lámina. Con 1 y 0 se comporta como una ventana opaca de toda la vida.
+    //  Cuántos fantasmas deja el cursor detrás. Cero, ninguno.
+    pub fn set_estela(&mut self, largo: u8) {
+        self.estela_largo = largo.min(24);
+        if largo == 0 {
+            self.cursor_estela.clear();
+        }
+    }
+
     pub fn set_cristal(&mut self, opacidad: f32, radio: f32) {
         self.opacidad = opacidad.clamp(0.2, 1.0);
         self.radio = radio.clamp(0., 40.);
@@ -441,6 +456,26 @@ impl TerminalView {
         self.font_size = Some(size);
         self.font_size_base = Some(size);
         self.invalidate_layout();
+    }
+
+    //  Todo lo que se puede cambiar sin reabrir la ventana, de una vez: es lo
+    //  que hace que tocar un deslizador en Ajustes se note aquí al momento.
+    pub fn set_apariencia(
+        &mut self,
+        font: gpui::Font,
+        tamano: Pixels,
+        margen: Pixels,
+        opacidad: f32,
+        radio: f32,
+        estela: u8,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_font(font);
+        self.set_font_size(tamano);
+        self.set_padding(margen);
+        self.set_cristal(opacidad, radio);
+        self.set_estela(estela);
+        cx.notify();
     }
 
     fn invalidate_layout(&mut self) {
@@ -1868,6 +1903,7 @@ struct TerminalPrepaintState {
     box_drawing_quads: Vec<PaintQuad>,
     marked_text: Option<(gpui::ShapedLine, gpui::Point<Pixels>)>,
     marked_text_background: Option<PaintQuad>,
+    estela: Vec<PaintQuad>,
     cursor: Option<PaintQuad>,
     //  Lo de la casa: el filete de cada mandato, el velo del modo tranquilo
     //  y la barra de desplazamiento.
@@ -2639,30 +2675,61 @@ impl Element for TerminalTextElement {
             let byte_index = byte_index_for_column_in_line(line.text.as_str(), col);
             let x = bounds.left() + line.x_for_index(byte_index.min(line.text.len()));
 
-            //  Deslizarse en vez de teletransportarse: es la diferencia entre
-            //  «terminal» y «terminal cara». Solo se persigue de cerca —los
-            //  saltos grandes, como cambiar de línea o limpiar la pantalla,
-            //  van directos, que si no parece que el cursor patine.
+            //  Deslizarse en vez de teletransportarse, y dejando estela: es
+            //  la diferencia entre «terminal» y «terminal cara». Persigue
+            //  también en los saltos de línea —ahí es donde más se luce— y
+            //  solo se planta de golpe cuando el salto es enorme, que es una
+            //  pantalla nueva y no un movimiento.
             let destino = point(x, y);
             let pintado = self.view.update(cx, |vista, _| {
                 let anterior = vista.cursor_pintado.unwrap_or(destino);
                 let dx = f32::from(destino.x - anterior.x).abs();
                 let dy = f32::from(destino.y - anterior.y).abs();
-                let cerca = dx < f32::from(line_height) * 6.0 && dy < f32::from(line_height) * 1.5;
+                let salto_enorme = dy > f32::from(line_height) * 12.0;
 
-                let lerp = |a: Pixels, b: Pixels| a + (b - a) * 0.45;
-                let nuevo = if cerca {
-                    point(lerp(anterior.x, destino.x), lerp(anterior.y, destino.y))
-                } else {
+                //  Cuanto más lejos, más rápido: así un salto de línea no se
+                //  arrastra y un movimiento de una letra se ve suave.
+                let lejos = (dx + dy) / f32::from(line_height).max(1.0);
+                let paso = (0.35 + lejos * 0.06).min(0.75);
+                let lerp = |a: Pixels, b: Pixels| a + (b - a) * paso;
+
+                let nuevo = if salto_enorme {
                     destino
+                } else {
+                    point(lerp(anterior.x, destino.x), lerp(anterior.y, destino.y))
                 };
                 //  A menos de medio píxel ya está en su sitio: dejar de pedir
                 //  fotogramas es lo que evita el bucle infinito de repintado.
                 let quieto = f32::from(nuevo.x - destino.x).abs() < 0.5
                     && f32::from(nuevo.y - destino.y).abs() < 0.5;
                 let nuevo = if quieto { destino } else { nuevo };
+
+                //  La estela son los sitios por donde acaba de pasar. Se
+                //  guarda aquí y no se calcula al pintar porque lo que se
+                //  quiere enseñar es el camino real, con su aceleración.
+                if vista.estela_largo > 0 {
+                    if !quieto || !vista.cursor_estela.is_empty() {
+                        vista.cursor_estela.push(anterior);
+                    }
+                    let sobran = vista
+                        .cursor_estela
+                        .len()
+                        .saturating_sub(vista.estela_largo as usize);
+                    if sobran > 0 {
+                        vista.cursor_estela.drain(..sobran);
+                    }
+                    //  Parado, la estela se recoge sola en unos pocos
+                    //  fotogramas en vez de quedarse ahí colgada. Con la
+                    //  comprobación delante: quieto y sin estela es el caso
+                    //  de siempre —el cursor parpadeando en el prompt— y sin
+                    //  ella la terminal se caía al abrir.
+                    if quieto && !vista.cursor_estela.is_empty() {
+                        vista.cursor_estela.remove(0);
+                    }
+                }
+
                 vista.cursor_pintado = Some(nuevo);
-                vista.cursor_moviendose = !quieto;
+                vista.cursor_moviendose = !quieto || !vista.cursor_estela.is_empty();
                 nuevo
             });
 
@@ -2671,6 +2738,26 @@ impl Element for TerminalTextElement {
                 cursor_color,
             ))
         });
+
+        //  Los fantasmas de la estela, del más viejo al más nuevo y cada vez
+        //  más presentes. Van antes que el cursor para que él quede encima.
+        let estela: Vec<PaintQuad> = {
+            let vista = self.view.read(cx);
+            let color = cursor_color_for_background(vista.session.default_background());
+            let total = vista.cursor_estela.len().max(1) as f32;
+            vista
+                .cursor_estela
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let fuerza = (i as f32 + 1.0) / total;
+                    fill(
+                        Bounds::new(*p, size(px(2.0), line_height)),
+                        color.opacity(fuerza * 0.35),
+                    )
+                })
+                .collect()
+        };
 
         let adornos = {
             let ancho = cell_width.map(f32::from).unwrap_or(8.0);
@@ -2687,6 +2774,7 @@ impl Element for TerminalTextElement {
             box_drawing_quads,
             marked_text,
             marked_text_background,
+            estela,
             cursor,
         }
     }
@@ -2780,6 +2868,10 @@ impl Element for TerminalTextElement {
                 );
             }
 
+            for quad in prepaint.estela.drain(..) {
+                window.paint_quad(quad);
+            }
+
             if let Some(cursor) = prepaint.cursor.take() {
                 window.paint_quad(cursor);
             }
@@ -2868,6 +2960,27 @@ impl Render for TerminalView {
                     .border_color(hsla(0., 0., 1.0, 0.08))
             })
             .child(TerminalTextElement { view: cx.entity() })
+            //  El botón de ajustes: una rueda apagada en la esquina que solo
+            //  se ve al acercar el ratón. Una terminal no debe tener cromo
+            //  permanente, pero tampoco obligarte a saberte un fichero.
+            .children(crate::ajustes_disponibles().then(|| {
+                div()
+                    .absolute()
+                    .bottom_1()
+                    .right_2()
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(8.))
+                    .text_color(hsla(0., 0., 0.35, 1.0))
+                    .hover(|d| {
+                        d.text_color(hsla(0., 0., 0.85, 1.0))
+                            .bg(hsla(0., 0., 1.0, 0.06))
+                    })
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, _| crate::abrir_ajustes())
+                    //  La rueda dentada de la Nerd Font, la misma de la barra.
+                    .child("\u{f0493}")
+            }))
             //  Un punto ámbar arriba a la derecha cuando el depósito de la
             //  barra está seco. Nada más: quien lo sepa, lo sabe.
             .children(self.seco.then(|| {

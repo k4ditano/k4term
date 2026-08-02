@@ -79,6 +79,29 @@ pub fn avisar_campana(pid: u32, titulo: &str) {
     llamar(&["campana", &pid.to_string(), titulo]);
 }
 
+//  ¿Hay barra ahí fuera? Es lo que decide si se ofrecen las puertas que
+//  llevan a ella: sin barra, ni botón de ajustes ni avisos.
+pub fn hay_barra() -> bool {
+    shell_qml().exists()
+}
+
+//  Abrir los Ajustes de la casa. Va al target del anfitrión y no al nuestro:
+//  los Ajustes son de la barra, y un plugin no manda sobre otro.
+pub fn abrir_ajustes() {
+    let qml = shell_qml();
+    if !qml.exists() {
+        return;
+    }
+    let _ = Command::new("quickshell")
+        .args(["ipc", "-p"])
+        .arg(&qml)
+        .args(["call", "k4", "settings"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
 //  Un recado suelto para que la barra lo enseñe: la terminal no tiene dónde
 //  decir «guardado» sin taparse a sí misma, y la isla sí.
 pub fn decir(titulo: &str, cuerpo: &str) {

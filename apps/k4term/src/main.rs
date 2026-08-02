@@ -149,6 +149,11 @@ fn main() {
             });
         }
 
+        //  El botón de ajustes solo existe si hay barra que los enseñe.
+        if barra::hay_barra() {
+            gpui_ghostty_terminal::registrar_ajustes(barra::abrir_ajustes);
+        }
+
         let opciones = WindowOptions {
             // Con nombre y apellidos: sin app_id la ventana sale con clase
             // vacía y ni Hyprland ni nadie puede dirigirse a ella.
@@ -326,6 +331,7 @@ fn main() {
                 vista.set_font_size(gpui::px(ajustes.tamano));
                 vista.set_padding(gpui::px(ajustes.margen));
                 vista.set_cristal(ajustes.opacidad, ajustes.radio);
+                vista.set_estela(ajustes.estela);
                 if ajustes.tranquilo {
                     vista.set_tranquilo(true, cx);
                 }
@@ -344,6 +350,7 @@ fn main() {
             });
 
             let temas = tema::vigilar(ruta_tema);
+            let cambios = k4term_puente::ajustes::vigilar();
             let view_for_task = view.clone();
             window
                 .spawn(cx, async move |cx| {
@@ -364,6 +371,7 @@ fn main() {
                         let campana = std::iter::from_fn(|| campana_rx.try_recv().ok()).count() > 0;
                         let marcas: Vec<Marca> =
                             std::iter::from_fn(|| marcas_rx.try_recv().ok()).collect();
+                        let ajuste_nuevo = std::iter::from_fn(|| cambios.try_recv().ok()).last();
 
                         //  `apagando` mantiene vivo el bucle mientras dure el
                         //  destello: sin salida nueva nadie volvería a pedir
@@ -387,6 +395,7 @@ fn main() {
                             && !campana
                             && !apagando
                             && marcas.is_empty()
+                            && ajuste_nuevo.is_none()
                         {
                             continue;
                         }
@@ -412,6 +421,19 @@ fn main() {
                                             this.acaba_bloque(*salida, cx)
                                         }
                                     }
+                                }
+                                //  Ajustes cambiados en caliente: lo que se
+                                //  toque en la barra se ve aquí sin reabrir.
+                                if let Some(a) = &ajuste_nuevo {
+                                    this.set_apariencia(
+                                        fuente(a.fuente.clone()),
+                                        gpui::px(a.tamano),
+                                        gpui::px(a.margen),
+                                        a.opacidad,
+                                        a.radio,
+                                        a.estela,
+                                        cx,
+                                    );
                                 }
                                 if campana {
                                     this.tocar_campana(cx);

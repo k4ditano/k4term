@@ -28,6 +28,8 @@ pub struct Ajustes {
     pub radio: f32,
     //  Atenuar lo anterior al último mandato, de salida.
     pub tranquilo: bool,
+    //  Cuántos fantasmas deja el cursor al moverse. 0, ninguno.
+    pub estela: u8,
 }
 
 impl Default for Ajustes {
@@ -46,6 +48,7 @@ impl Default for Ajustes {
             //  con el radio que el usuario tenga puesto en su tema.
             radio: 0.0,
             tranquilo: false,
+            estela: 8,
         }
     }
 }
@@ -59,6 +62,46 @@ pub fn ruta_por_defecto() -> PathBuf {
         format!("{home}/.config")
     });
     PathBuf::from(base).join("k4term/k4term.conf")
+}
+
+//  Los ajustes, seguidos en caliente. Se vigila la carpeta y no el fichero
+//  por lo de siempre: quien lo escribe lo reemplaza entero y un vigía clavado
+//  al inodo viejo se queda mirando un fichero que ya no es.
+pub fn vigilar() -> std::sync::mpsc::Receiver<Ajustes> {
+    let (tx, rx) = std::sync::mpsc::channel::<Ajustes>();
+    let ruta = ruta_por_defecto();
+
+    std::thread::spawn(move || {
+        use notify::Watcher;
+        let (tx_fs, rx_fs) = std::sync::mpsc::channel();
+        let Ok(mut vigia) = notify::recommended_watcher(tx_fs) else {
+            return;
+        };
+        let Some(carpeta) = ruta.parent().map(|c| c.to_path_buf()) else {
+            return;
+        };
+        //  Si la carpeta no existe todavía, no hay nada que vigilar y
+        //  tampoco nada que romper: se sale en silencio.
+        if vigia
+            .watch(&carpeta, notify::RecursiveMode::NonRecursive)
+            .is_err()
+        {
+            return;
+        }
+
+        while let Ok(suceso) = rx_fs.recv() {
+            let Ok(suceso) = suceso else { continue };
+            if !suceso.paths.iter().any(|p| p == &ruta) {
+                continue;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            if tx.send(Ajustes::leer()).is_err() {
+                return;
+            }
+        }
+    });
+
+    rx
 }
 
 impl Ajustes {
@@ -110,6 +153,15 @@ impl Ajustes {
                 "radio" | "radius" => {
                     if let Ok(n) = valor.parse::<f32>() {
                         self.radio = n.clamp(0.0, 40.0);
+                    }
+                }
+                "estela" | "trail" => {
+                    //  Admite «si/no» además del número: quien lo toca desde
+                    //  Ajustes ve un interruptor, no una cifra.
+                    self.estela = match valor.to_lowercase().as_str() {
+                        "si" | "sí" | "true" => 8,
+                        "no" | "false" => 0,
+                        otro => otro.parse::<u8>().unwrap_or(self.estela).min(24),
                     }
                 }
                 "tranquilo" | "quiet" => {

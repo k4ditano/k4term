@@ -18,6 +18,25 @@ pub(crate) fn edinot_disponible() -> bool {
     ANOTADOR.get().is_some()
 }
 
+//  Abrir los Ajustes de la casa. Igual que con Edinot: si nadie lo registra,
+//  el botón ni se pinta — una terminal suelta no tiene dónde mandarte.
+type Abridor = dyn Fn() + Send + Sync + 'static;
+static AJUSTES: std::sync::OnceLock<Box<Abridor>> = std::sync::OnceLock::new();
+
+pub fn registrar_ajustes(f: impl Fn() + Send + Sync + 'static) {
+    let _ = AJUSTES.set(Box::new(f));
+}
+
+pub(crate) fn ajustes_disponibles() -> bool {
+    AJUSTES.get().is_some()
+}
+
+pub(crate) fn abrir_ajustes() {
+    if let Some(f) = AJUSTES.get() {
+        f();
+    }
+}
+
 pub(crate) fn anotar_en_segundo_plano(titulo: String, texto: String) {
     if let Some(f) = ANOTADOR.get() {
         f(titulo, texto);
