@@ -117,6 +117,11 @@ struct Marco {
     cursor: [u16; 2],
     cols: u16,
     filas_n: u16,
+    //  Hasta dónde llega lo escrito: con esto la isla puede crecer con el
+    //  contenido en vez de reservar siempre el mismo cajón.
+    usadas: u16,
+    //  Dónde está la sesión, para que el pie diga algo útil.
+    cwd: String,
 }
 
 fn hex(c: Rgb) -> String {
@@ -166,24 +171,38 @@ fn fila_en_tramos(term: &Terminal, fila: u16, fondo: &str) -> Vec<Tramo> {
 //  volcado empiezan en 0, y el cursor viene en 1. Volcar desde 1 se comía la
 //  primera fila y dejaba el cursor pintado una línea por debajo de donde de
 //  verdad escribes.
-fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str) -> Marco {
+fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str, cwd: String) -> Marco {
     let mut salida = Vec::with_capacity(filas as usize);
     for f in 0..filas {
         salida.push(fila_en_tramos(term, f, fondo));
     }
     let (col, fila) = term.cursor_position().unwrap_or((1, 1));
+
+    //  La última fila con algo escrito, o donde esté el cursor si va por
+    //  debajo: es lo que de verdad ocupa la sesión ahora mismo.
+    let ultima = salida
+        .iter()
+        .rposition(|f| !f.is_empty())
+        .map(|i| i as u16 + 1)
+        .unwrap_or(0);
+
     Marco {
         que: "marco",
         filas: salida,
         cursor: [col, fila],
         cols,
         filas_n: filas,
+        usadas: ultima.max(fila),
+        cwd,
     }
 }
 
 //  El dueño del VT. Nadie más lo toca: le llegan recados, decide cuándo la
 //  pantalla está lo bastante quieta y manda la foto.
+//  El directorio se mira al pintar y no en cada byte: es una lectura de
+//  /proc, barata, pero no hay por qué hacerla cincuenta veces por `ls`.
 fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32) {
+    let mut ultimo_cwd = String::new();
     let mut term = match Terminal::new(COLS, FILAS) {
         Ok(t) => t,
         Err(_) => return,
@@ -262,7 +281,12 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32) {
 
         let vencido = desde.is_some_and(|d| d.elapsed() >= MAXIMO);
         if sucio && (quieto || vencido) {
-            if let Ok(json) = serde_json::to_string(&marco(&term, cols, filas, &fondo)) {
+            if let Some(d) = directorio(pid_shell) {
+                ultimo_cwd = d;
+            }
+            if let Ok(json) =
+                serde_json::to_string(&marco(&term, cols, filas, &fondo, ultimo_cwd.clone()))
+            {
                 let mut s = salida.lock();
                 if writeln!(s, "{}", json).is_err() || s.flush().is_err() {
                     break;

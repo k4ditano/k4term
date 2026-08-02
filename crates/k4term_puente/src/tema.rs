@@ -23,12 +23,23 @@ pub struct Color {
 pub struct Tema {
     pub fondo: Color,
     pub tinta: Color,
+    //  El depósito de chispa de la barra, seco. Viene por el mismo fichero
+    //  porque es lo mismo: lo que la barra publica de sí misma.
+    pub seco: bool,
 }
 
 #[derive(Deserialize)]
 struct TemaCrudo {
     fondo: String,
     tinta: String,
+    #[serde(default)]
+    tokens: Option<TokensCrudo>,
+}
+
+#[derive(Deserialize)]
+struct TokensCrudo {
+    #[serde(default)]
+    seco: bool,
 }
 
 //  Qt escribe «#rrggbb», y «#aarrggbb» cuando el color lleva alfa — el alfa
@@ -62,6 +73,7 @@ pub fn leer(ruta: &Path) -> Option<Tema> {
     Some(Tema {
         fondo: color_de_hex(&crudo.fondo)?,
         tinta: color_de_hex(&crudo.tinta)?,
+        seco: crudo.tokens.map(|t| t.seco).unwrap_or(false),
     })
 }
 

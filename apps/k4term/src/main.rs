@@ -25,10 +25,11 @@ use std::time::Duration;
 use gpui::{App, AppContext, Application, KeyBinding, TitlebarOptions, WindowOptions};
 use gpui_ghostty_terminal::view::{
     Copy, CopyLastOutput, DecreaseFontSize, Find, IncreaseFontSize, NextBlock, Paste, PreviousBlock,
-    ResetFontSize, SelectAll, TerminalInput, TerminalView, ToggleQuiet,
+    ResetFontSize, SelectAll, SendBlockToNote, SendSessionToNote, TerminalInput, TerminalView,
+    ToggleQuiet,
 };
 use gpui_ghostty_terminal::{Rgb, TerminalConfig, TerminalSession};
-use k4term_puente::{Ajustes, Aviso, Suceso, barra, osc::Escaner, tema, trabajos};
+use k4term_puente::{Ajustes, Aviso, Suceso, barra, edinot, osc::Escaner, tema, trabajos};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 //  La que digan los ajustes, con los respaldos de siempre detrás: si la
@@ -132,7 +133,21 @@ fn main() {
             KeyBinding::new("ctrl-shift-down", NextBlock, None),
             KeyBinding::new("ctrl-shift-e", CopyLastOutput, None),
             KeyBinding::new("ctrl-shift-q", ToggleQuiet, None),
+            KeyBinding::new("ctrl-shift-n", SendBlockToNote, None),
+            KeyBinding::new("ctrl-shift-m", SendSessionToNote, None),
         ]);
+
+        //  La puerta a Edinot solo se abre si Edinot está. Quien no lo tenga
+        //  no se entera de que existe: las teclas no hacen nada y nadie le da
+        //  la lata con un error por algo que nunca pidió.
+        if edinot::disponible() {
+            gpui_ghostty_terminal::registrar_anotador(|titulo, texto| {
+                thread::spawn(move || match edinot::anotar(&titulo, &texto) {
+                    Ok(nota) => barra::decir("Guardado en Edinot", &nota),
+                    Err(fallo) => barra::decir("No se pudo guardar en Edinot", &fallo),
+                });
+            });
+        }
 
         let opciones = WindowOptions {
             // Con nombre y apellidos: sin app_id la ventana sale con clase
@@ -357,6 +372,12 @@ fn main() {
                         cx.update(|_, cx| {
                             view_for_task.update(cx, |this, cx| {
                                 apagando = this.campana_encendida(cx);
+                                //  El cursor deslizándose también pide seguir
+                                //  pintando aunque no llegue nada nuevo.
+                                if this.animando() {
+                                    apagando = true;
+                                    cx.notify();
+                                }
                             });
                         })
                         .ok();
@@ -379,6 +400,7 @@ fn main() {
                                 }
                                 if let Some(t) = ultimo_tema {
                                     this.set_default_colors(rgb(t.tinta), rgb(t.fondo), cx);
+                                    this.set_seco(t.seco, cx);
                                 }
                                 //  Las marcas van DESPUÉS de tragar la salida:
                                 //  el sitio donde empieza un mandato es el que

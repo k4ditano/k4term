@@ -8,6 +8,7 @@
 
 pub mod ajustes;
 pub mod barra;
+pub mod edinot;
 pub mod osc;
 pub mod tema;
 pub mod trabajos;

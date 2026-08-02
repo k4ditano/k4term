@@ -78,3 +78,9 @@ pub fn limpiar(pid: u32) {
 pub fn avisar_campana(pid: u32, titulo: &str) {
     llamar(&["campana", &pid.to_string(), titulo]);
 }
+
+//  Un recado suelto para que la barra lo enseñe: la terminal no tiene dónde
+//  decir «guardado» sin taparse a sí misma, y la isla sí.
+pub fn decir(titulo: &str, cuerpo: &str) {
+    llamar(&["decir", titulo, cuerpo]);
+}

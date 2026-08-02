@@ -25,7 +25,9 @@ actions!(
         PreviousBlock,
         NextBlock,
         CopyLastOutput,
-        ToggleQuiet
+        ToggleQuiet,
+        SendBlockToNote,
+        SendSessionToNote
     ]
 );
 
@@ -269,6 +271,12 @@ pub struct TerminalView {
     tranquilo: bool,
     opacidad: f32,
     radio: f32,
+    //  Dónde está pintado el cursor ahora mismo, que no es lo mismo que
+    //  dónde está: entre los dos sitios hay una animación.
+    cursor_pintado: Option<gpui::Point<Pixels>>,
+    cursor_moviendose: bool,
+    //  El depósito de chispa de la barra, seco.
+    seco: bool,
 }
 
 //  Un mandato: dónde empezó, dónde acabó y con qué código. Las filas van en
@@ -339,6 +347,9 @@ impl TerminalView {
             tranquilo: false,
             opacidad: 1.0,
             radio: 0.,
+            cursor_pintado: None,
+            cursor_moviendose: false,
+            seco: false,
         }
         .with_refreshed_viewport()
     }
@@ -392,6 +403,9 @@ impl TerminalView {
             tranquilo: false,
             opacidad: 1.0,
             radio: 0.,
+            cursor_pintado: None,
+            cursor_moviendose: false,
+            seco: false,
         }
         .with_refreshed_viewport()
     }
@@ -519,6 +533,16 @@ impl TerminalView {
         self.session.title().unwrap_or("k4term").to_string()
     }
 
+    //  Que la barra se ha quedado sin chispa. Se enseña con un punto y no
+    //  con un cartel: enterarse sin que te interrumpan es todo lo que se
+    //  pide de un aviso así.
+    pub fn set_seco(&mut self, valor: bool, cx: &mut Context<Self>) {
+        if self.seco != valor {
+            self.seco = valor;
+            cx.notify();
+        }
+    }
+
     pub fn set_tranquilo(&mut self, valor: bool, cx: &mut Context<Self>) {
         self.tranquilo = valor;
         cx.notify();
@@ -571,19 +595,10 @@ impl TerminalView {
         cx.notify();
     }
 
-    //  Copiar la salida del último mandato: la que se pega en el chat cuando
-    //  algo ha fallado, que es el 90 % de los copiados de una terminal.
-    fn on_copy_last_output(
-        &mut self,
-        _: &CopyLastOutput,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(bloque) = self.bloques.last().copied() else {
-            return;
-        };
-        //  Del principio del mandato al final, o hasta donde esté el cursor
-        //  si todavía está corriendo.
+    //  El texto del último mandato, del principio al final —o hasta donde
+    //  esté el cursor si todavía corre.
+    fn texto_del_ultimo_bloque(&self) -> Option<(String, String)> {
+        let bloque = self.bloques.last().copied()?;
         let hasta = bloque
             .fin
             .or_else(|| self.fila_absoluta_del_cursor())
@@ -598,13 +613,80 @@ impl TerminalView {
         }
         let texto = texto.trim_end().to_string();
         if texto.is_empty() {
-            return;
+            return None;
         }
+        //  La primera línea es el prompt con el mandato: sirve de título.
+        let titulo = texto.lines().next().unwrap_or("mandato").trim().to_string();
+        Some((titulo, texto))
+    }
 
+    //  Toda la sesión, del principio del historial a donde estemos.
+    fn texto_de_la_sesion(&self) -> Option<String> {
+        let (_, total) = self.session.viewport_position()?;
+        let mut texto = String::new();
+        for fila in 0..total {
+            if let Some(linea) = self.session.dump_screen_row(fila) {
+                texto.push_str(linea.trim_end());
+                texto.push('\n');
+            }
+        }
+        let texto = texto.trim().to_string();
+        (!texto.is_empty()).then_some(texto)
+    }
+
+    //  Copiar la salida del último mandato: la que se pega en el chat cuando
+    //  algo ha fallado, que es el 90 % de los copiados de una terminal.
+    fn on_copy_last_output(
+        &mut self,
+        _: &CopyLastOutput,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((_, texto)) = self.texto_del_ultimo_bloque() else {
+            return;
+        };
         let item = ClipboardItem::new_string(texto);
         cx.write_to_clipboard(item.clone());
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         cx.write_to_primary(item);
+    }
+
+    //  A la nota del día de Edinot — **si lo tienes**. Quien no lo tenga no
+    //  se entera de que esta puerta existe: la tecla no hace nada y no se le
+    //  da la lata con un error por algo que nunca pidió.
+    //
+    //  Va en su propio hilo porque levantar el servidor cuesta un segundo
+    //  largo, y una terminal que se congela al pulsar una tecla no la quiere
+    //  nadie.
+    fn on_send_block_to_note(
+        &mut self,
+        _: &SendBlockToNote,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        if !crate::edinot_disponible() {
+            return;
+        }
+        let Some((titulo, texto)) = self.texto_del_ultimo_bloque() else {
+            return;
+        };
+        crate::anotar_en_segundo_plano(titulo, texto);
+    }
+
+    fn on_send_session_to_note(
+        &mut self,
+        _: &SendSessionToNote,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        if !crate::edinot_disponible() {
+            return;
+        }
+        let Some(texto) = self.texto_de_la_sesion() else {
+            return;
+        };
+        let titulo = format!("Sesión de terminal · {}", self.titulo_actual());
+        crate::anotar_en_segundo_plano(titulo, texto);
     }
 
     //  La campana, vista: un destello de 120 ms sobre la pantalla. Devuelve
@@ -614,6 +696,13 @@ impl TerminalView {
         self.campana_hasta =
             Some(std::time::Instant::now() + std::time::Duration::from_millis(120));
         cx.notify();
+    }
+
+    //  ¿Hay algo animándose que pida otro fotograma? El anfitrión lo consulta
+    //  en su bucle: sin esto, el cursor se quedaría a medio camino hasta que
+    //  llegara salida nueva.
+    pub fn animando(&self) -> bool {
+        self.cursor_moviendose
     }
 
     pub fn campana_encendida(&mut self, cx: &mut Context<Self>) -> bool {
@@ -1792,6 +1881,7 @@ fn adornos_de_la_casa(
     bounds: Bounds<Pixels>,
     line_height: Pixels,
     filas: usize,
+    ancho_celda: f32,
 ) -> Vec<PaintQuad> {
     let mut salida = Vec::new();
     let Some((arriba, total)) = vista.session.viewport_position() else {
@@ -1799,6 +1889,47 @@ fn adornos_de_la_casa(
     };
 
     let y_de = |indice: usize| bounds.top() + line_height * indice as f32;
+
+    // ── todas las coincidencias de la búsqueda ────────────────────
+    //
+    //  Saltar a una está bien; ver dónde están todas es lo que hace que la
+    //  búsqueda sirva. La activa va en sólido, las demás insinuadas.
+    if let Some(b) = vista.busqueda.as_ref() {
+        let patron = b.patron.to_lowercase();
+        if !patron.is_empty() {
+            let activa = b.resultados.get(b.indice).copied();
+            for (indice, linea) in vista.viewport_lines.iter().enumerate() {
+                if indice >= filas {
+                    break;
+                }
+                let bajo = linea.to_lowercase();
+                let esta_activa = activa == Some(arriba + indice as u32);
+                let mut desde = 0usize;
+                while let Some(pos) = bajo[desde..].find(&patron) {
+                    let ini = desde + pos;
+                    //  Columnas, no bytes: una tilde ocupa dos bytes y una
+                    //  columna, y por bytes el resalte se desplaza.
+                    let col = bajo[..ini].chars().count();
+                    let ancho = patron.chars().count();
+                    salida.push(fill(
+                        Bounds::new(
+                            point(
+                                bounds.left() + px(ancho_celda * col as f32),
+                                y_de(indice),
+                            ),
+                            size(px(ancho_celda * ancho as f32), line_height),
+                        ),
+                        if esta_activa {
+                            hsla(0.13, 1.0, 0.52, 0.55)
+                        } else {
+                            hsla(0.13, 1.0, 0.52, 0.22)
+                        },
+                    ));
+                    desde = ini + patron.len();
+                }
+            }
+        }
+    }
 
     // ── el filete de cada mandato ─────────────────────────────────
     //
@@ -2508,15 +2639,43 @@ impl Element for TerminalTextElement {
             let byte_index = byte_index_for_column_in_line(line.text.as_str(), col);
             let x = bounds.left() + line.x_for_index(byte_index.min(line.text.len()));
 
+            //  Deslizarse en vez de teletransportarse: es la diferencia entre
+            //  «terminal» y «terminal cara». Solo se persigue de cerca —los
+            //  saltos grandes, como cambiar de línea o limpiar la pantalla,
+            //  van directos, que si no parece que el cursor patine.
+            let destino = point(x, y);
+            let pintado = self.view.update(cx, |vista, _| {
+                let anterior = vista.cursor_pintado.unwrap_or(destino);
+                let dx = f32::from(destino.x - anterior.x).abs();
+                let dy = f32::from(destino.y - anterior.y).abs();
+                let cerca = dx < f32::from(line_height) * 6.0 && dy < f32::from(line_height) * 1.5;
+
+                let lerp = |a: Pixels, b: Pixels| a + (b - a) * 0.45;
+                let nuevo = if cerca {
+                    point(lerp(anterior.x, destino.x), lerp(anterior.y, destino.y))
+                } else {
+                    destino
+                };
+                //  A menos de medio píxel ya está en su sitio: dejar de pedir
+                //  fotogramas es lo que evita el bucle infinito de repintado.
+                let quieto = f32::from(nuevo.x - destino.x).abs() < 0.5
+                    && f32::from(nuevo.y - destino.y).abs() < 0.5;
+                let nuevo = if quieto { destino } else { nuevo };
+                vista.cursor_pintado = Some(nuevo);
+                vista.cursor_moviendose = !quieto;
+                nuevo
+            });
+
             Some(fill(
-                Bounds::new(point(x, y), size(px(2.0), line_height)),
+                Bounds::new(pintado, size(px(2.0), line_height)),
                 cursor_color,
             ))
         });
 
         let adornos = {
+            let ancho = cell_width.map(f32::from).unwrap_or(8.0);
             let vista = self.view.read(cx);
-            adornos_de_la_casa(vista, bounds, line_height, shaped_lines.len())
+            adornos_de_la_casa(vista, bounds, line_height, shaped_lines.len(), ancho)
         };
 
         TerminalPrepaintState {
@@ -2673,6 +2832,8 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::on_next_block))
             .on_action(cx.listener(Self::on_copy_last_output))
             .on_action(cx.listener(Self::on_toggle_quiet))
+            .on_action(cx.listener(Self::on_send_block_to_note))
+            .on_action(cx.listener(Self::on_send_session_to_note))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -2701,6 +2862,17 @@ impl Render for TerminalView {
             .border_1()
             .border_color(hsla(0., 0., 1.0, 0.08))
             .child(TerminalTextElement { view: cx.entity() })
+            //  Un punto ámbar arriba a la derecha cuando el depósito de la
+            //  barra está seco. Nada más: quien lo sepa, lo sabe.
+            .children(self.seco.then(|| {
+                div()
+                    .absolute()
+                    .top_2()
+                    .right_2()
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(hsla(0.13, 1.0, 0.52, 0.8))
+            }))
             .children(
                 self.campana_hasta
                     .filter(|hasta| std::time::Instant::now() < *hasta)
