@@ -5,3 +5,6 @@ crates/ghostty_vt_sys/zig/.zig-cache
 
 
 .zig-cache/
+
+# Toolchain Zig local (lo trae scripts/bootstrap o se descarga a mano)
+.context/

@@ -225,6 +225,8 @@ pub struct TerminalView {
     marked_text: Option<SharedString>,
     marked_selected_range_utf16: Range<usize>,
     font: gpui::Font,
+    on_resize: Option<std::rc::Rc<dyn Fn(u16, u16)>>,
+    padding: Pixels,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -263,6 +265,8 @@ impl TerminalView {
             marked_text: None,
             marked_selected_range_utf16: 0..0,
             font: crate::default_terminal_font(),
+            on_resize: None,
+            padding: px(0.),
         }
         .with_refreshed_viewport()
     }
@@ -306,8 +310,28 @@ impl TerminalView {
             marked_text: None,
             marked_selected_range_utf16: 0..0,
             font: crate::default_terminal_font(),
+            on_resize: None,
+            padding: px(0.),
         }
         .with_refreshed_viewport()
+    }
+
+    // El aviso de redimensión: la vista ya ajusta el VT sola al pintarse; el
+    // anfitrión registra aquí cómo enterarse para ajustar también su PTY.
+    pub fn set_on_resize(&mut self, cb: impl Fn(u16, u16) + 'static) {
+        self.on_resize = Some(std::rc::Rc::new(cb));
+    }
+
+    pub fn set_font(&mut self, font: gpui::Font) {
+        self.font = font;
+        self.line_layouts.clear();
+        self.line_layout_key = None;
+    }
+
+    // Aire alrededor del texto. La rejilla se calcula sobre los bounds del
+    // elemento ya acolchado, así que cols/rows se descuentan solos.
+    pub fn set_padding(&mut self, padding: Pixels) {
+        self.padding = padding;
     }
 
     fn utf16_len(s: &str) -> usize {
@@ -1973,8 +1997,24 @@ impl Element for TerminalTextElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.view.update(cx, |view, _cx| {
+        let font = self.view.read(cx).font.clone();
+        let metrics = cell_metrics(window, &font);
+        self.view.update(cx, |view, cx| {
             view.last_bounds = Some(bounds);
+
+            // La rejilla persigue al elemento: si el tamaño pintado ya no casa
+            // con la sesión, se ajusta aquí mismo — el primer pintado incluido,
+            // que es el hueco que dejaba observar solo los cambios de ventana.
+            if let Some((cell_width, cell_height)) = metrics {
+                let cols = (f32::from(bounds.size.width) / cell_width).floor().max(2.0) as u16;
+                let rows = (f32::from(bounds.size.height) / cell_height).floor().max(2.0) as u16;
+                if cols != view.session.cols() || rows != view.session.rows() {
+                    view.resize_terminal(cols, rows, cx);
+                    if let Some(cb) = view.on_resize.clone() {
+                        cb(cols, rows);
+                    }
+                }
+            }
         });
 
         let focus_handle = { self.view.read(cx).focus_handle.clone() };
@@ -2082,9 +2122,10 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::on_mouse_up))
-            .bg(gpui::black())
+            .bg(hsla_from_rgb(self.session.default_background()))
             .text_color(gpui::white())
             .font(self.font.clone())
+            .p(self.padding)
             .whitespace_nowrap()
             .child(TerminalTextElement { view: cx.entity() })
     }

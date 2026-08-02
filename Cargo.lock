@@ -2660,6 +2660,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "k4term"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "gpui_ghostty_terminal",
+ "portable-pty",
+]
+
+[[package]]
 name = "khronos-egl"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
