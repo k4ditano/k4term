@@ -83,7 +83,7 @@ enum Recado {
     Pinta,
     Donde,
     Rueda { lineas: i32 },
-    Ajustes { estela: u8 },
+    Ajustes(Box<k4term_puente::Ajustes>),
 }
 
 #[derive(Serialize)]
@@ -100,6 +100,14 @@ struct Donde {
 struct Config {
     que: &'static str,
     estela: u8,
+    //  Y con qué letra se pinta. No es un detalle de gusto: la barra dibuja
+    //  una REJILLA, y el ancho de celda lo saca de medir la fuente. Si mide
+    //  con una y pinta con otra —o si mide con la variante de iconos, que los
+    //  lleva a doble ancho— la celda no vale lo que ocupa un carácter y el
+    //  cursor se va separando del texto hacia la derecha. Que venga de aquí es
+    //  lo que garantiza que la isla y la ventana usan la misma.
+    fuente: String,
+    tamano: f32,
 }
 
 //  Dónde está la sesión ahora mismo. Se le pregunta al kernel por el
@@ -119,6 +127,16 @@ struct Tramo {
     //  Negrita y compañía, tal como los da el VT: la barra decide qué hace
     //  con ellos.
     n: u8,
+    //  La COLUMNA por la que empieza, contando desde 1.
+    //
+    //  Sin esto la barra encadenaba los tramos uno detrás de otro con el ancho
+    //  natural de su texto, y un terminal no es texto encadenado: es una
+    //  rejilla de celdas iguales. En cuanto aparecía un glifo que no mide lo
+    //  mismo que los demás —los marcos de las cajas, un icono de la Nerd Font,
+    //  un espacio duro— la línea se iba desplazando a la derecha respecto del
+    //  cursor, que sí se coloca por columna. Con la columna a cuestas, cada
+    //  tramo se ancla donde le toca y el error no se acumula.
+    c: u16,
 }
 
 #[derive(Serialize)]
@@ -171,6 +189,7 @@ fn fila_en_tramos(term: &Terminal, fila: u16, fondo: &str) -> Vec<Tramo> {
             f: hex(run.fg),
             b: hex(run.bg),
             n: run.flags,
+            c: run.start_col.max(1),
         });
     }
 
@@ -218,10 +237,12 @@ fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str, cwd: String) -> Ma
     }
 }
 
-fn decir_config(salida: &std::io::Stdout, estela: u8) {
+fn decir_config(salida: &std::io::Stdout, ajustes: &k4term_puente::Ajustes) {
     if let Ok(json) = serde_json::to_string(&Config {
         que: "config",
-        estela,
+        estela: ajustes.estela,
+        fuente: ajustes.fuente.clone(),
+        tamano: ajustes.tamano,
     }) {
         let mut s = salida.lock();
         let _ = writeln!(s, "{}", json);
@@ -233,7 +254,7 @@ fn decir_config(salida: &std::io::Stdout, estela: u8) {
 //  pantalla está lo bastante quieta y manda la foto.
 //  El directorio se mira al pintar y no en cada byte: es una lectura de
 //  /proc, barata, pero no hay por qué hacerla cincuenta veces por `ls`.
-fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32) {
+fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<Vec<u8>>) {
     let mut ultimo_cwd = String::new();
     let mut term = match Terminal::new(COLS, FILAS) {
         Ok(t) => t,
@@ -267,7 +288,7 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32) {
     //  Los ajustes van por delante del primer marco: si llegaran después, la
     //  vista pintaría el primer cursor con la estela de fábrica y la
     //  corregiría a la vista del usuario.
-    decir_config(&salida, k4term_puente::Ajustes::leer().estela);
+    decir_config(&salida, &k4term_puente::Ajustes::leer());
 
     loop {
         let recado = if sucio {
@@ -283,6 +304,14 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32) {
         match recado {
             Ok(Recado::Bytes(b)) => {
                 let _ = term.feed(&b);
+                //  Y lo que haya que contestar, de vuelta por el PTY. Va
+                //  pegado al feed porque quien pregunta está esperando: un
+                //  TUI que consulta el terminal y no recibe respuesta se
+                //  coloca a ciegas.
+                let respuestas = term.take_responses();
+                if !respuestas.is_empty() {
+                    let _ = al_pty.send(respuestas);
+                }
                 sucio = true;
                 desde.get_or_insert_with(Instant::now);
             }
@@ -304,8 +333,8 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32) {
                 sucio = true;
                 desde.get_or_insert_with(Instant::now);
             }
-            Ok(Recado::Ajustes { estela }) => {
-                decir_config(&salida, estela);
+            Ok(Recado::Ajustes(ajustes)) => {
+                decir_config(&salida, &ajustes);
             }
             Ok(Recado::Donde) => {
                 let ruta = directorio(pid_shell).unwrap_or_default();
@@ -366,8 +395,26 @@ fn main() {
     let mut hijo = par.slave.spawn_command(cmd).expect("no arrancó la shell");
     let pid_shell = hijo.process_id().unwrap_or(0);
 
+    // ── el que escribe en el PTY ──────────────────────────────────
+    //
+    //  Un hilo con el escritor y nada más, porque ahora le escriben DOS: las
+    //  teclas que llegan de la barra y las respuestas que el terminal debe dar
+    //  a quien le pregunta. El escritor no se puede compartir, así que en vez
+    //  de repartirlo se le pone buzón.
+    let (al_pty, del_buzon) = channel::<Vec<u8>>();
+    thread::spawn(move || {
+        while let Ok(bytes) = del_buzon.recv() {
+            if escritor.write_all(&bytes).is_err() || escritor.flush().is_err() {
+                break;
+            }
+        }
+    });
+
     let (tx, rx) = channel::<Recado>();
-    thread::spawn(move || motor(rx, pid_shell));
+    {
+        let al_pty = al_pty.clone();
+        thread::spawn(move || motor(rx, pid_shell, al_pty));
+    }
 
     // ── los ajustes, en caliente ──────────────────────────────────
     //
@@ -379,11 +426,7 @@ fn main() {
         thread::spawn(move || {
             let rx_ajustes = k4term_puente::ajustes::vigilar();
             while let Ok(ajustes) = rx_ajustes.recv() {
-                if tx
-                    .send(Recado::Ajustes {
-                        estela: ajustes.estela,
-                    })
-                    .is_err()
+                if tx.send(Recado::Ajustes(Box::new(ajustes))).is_err()
                 {
                     break;
                 }
@@ -410,9 +453,9 @@ fn main() {
 
     // ── la barra manda ────────────────────────────────────────────
     //
-    //  Este hilo es el único dueño del master y del escritor, que tampoco se
-    //  pueden compartir. Si la barra se va, nos vamos con ella: quedarse sería
-    //  dejar una shell huérfana por ahí.
+    //  Este hilo es el único dueño del master, que no se puede compartir. Lo
+    //  que se escribe va por el buzón del PTY, que es de otro. Si la barra se
+    //  va, nos vamos con ella: quedarse sería dejar una shell huérfana.
     thread::spawn(move || {
         let entrada = std::io::stdin();
         for linea in entrada.lock().lines() {
@@ -423,8 +466,7 @@ fn main() {
 
             match orden {
                 Orden::Texto { valor } => {
-                    let _ = escritor.write_all(valor.as_bytes());
-                    let _ = escritor.flush();
+                    let _ = al_pty.send(valor.into_bytes());
                 }
                 Orden::Tecla {
                     nombre,
@@ -439,8 +481,7 @@ fn main() {
                         super_key: false,
                     };
                     if let Some(bytes) = encode_key_named(&nombre, mods) {
-                        let _ = escritor.write_all(&bytes);
-                        let _ = escritor.flush();
+                        let _ = al_pty.send(bytes);
                     }
                 }
                 Orden::Medida { cols, filas } => {

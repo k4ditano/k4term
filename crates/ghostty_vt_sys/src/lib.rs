@@ -52,6 +52,10 @@ unsafe extern "C" {
         row_out: *mut u16,
     ) -> bool;
 
+    pub fn ghostty_vt_terminal_take_responses(
+        terminal: *mut core::ffi::c_void,
+    ) -> ghostty_vt_bytes_t;
+
     pub fn ghostty_vt_terminal_dump_viewport(
         terminal: *mut core::ffi::c_void,
     ) -> ghostty_vt_bytes_t;

@@ -4,11 +4,24 @@ const terminal = @import("ghostty_src/terminal/main.zig");
 
 const Allocator = std.mem.Allocator;
 
+//  Lo que el terminal tiene que CONTESTAR.
+//
+//  Un terminal no solo recibe: le preguntan. «¿Quién eres?» (DA), «¿dónde está
+//  el cursor?» (DSR), «¿tienes puesto este modo?» (DECRQM). Y quien pregunta se
+//  queda esperando la respuesta por el mismo PTY por donde escribe.
+//
+//  Aquí no hay PTY —esta capa solo entiende de bytes—, así que las respuestas
+//  se apuntan en esta cola y quien nos usa las recoge y las escribe él. Sin
+//  esto, las preguntas caían al vacío y el programa de turno se quedaba
+//  esperando algo que no iba a llegar.
+const Respuestas = std.ArrayList(u8);
+
 const TerminalHandle = struct {
     alloc: Allocator,
     terminal: terminal.Terminal,
     stream: terminal.Stream(*Handler),
     handler: Handler,
+    respuestas: Respuestas,
     default_fg: terminal.color.RGB,
     default_bg: terminal.color.RGB,
     viewport_top_y_screen: u32,
@@ -30,14 +43,16 @@ const TerminalHandle = struct {
         handle.* = .{
             .alloc = alloc,
             .terminal = t,
-            .handler = .{ .terminal = undefined },
+            .handler = .{ .terminal = undefined, .respuestas = undefined },
             .stream = undefined,
+            .respuestas = Respuestas.init(alloc),
             .default_fg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
             .default_bg = .{ .r = 0x00, .g = 0x00, .b = 0x00 },
             .viewport_top_y_screen = 0,
             .has_viewport_top_y_screen = true,
         };
         handle.handler.terminal = &handle.terminal;
+        handle.handler.respuestas = &handle.respuestas;
         handle.stream = terminal.Stream(*Handler).init(&handle.handler);
         handle.stream.parser.osc_parser.alloc = alloc;
         return handle;
@@ -45,6 +60,7 @@ const TerminalHandle = struct {
 
     fn deinit(self: *TerminalHandle) void {
         self.stream.deinit();
+        self.respuestas.deinit();
         self.terminal.deinit(self.alloc);
         self.alloc.destroy(self);
     }
@@ -52,6 +68,14 @@ const TerminalHandle = struct {
 
 const Handler = struct {
     terminal: *terminal.Terminal,
+    respuestas: *Respuestas,
+
+    fn contestar(self: *Handler, bytes: []const u8) void {
+        //  Si no hay memoria para contestar, mejor callarse que caerse: el
+        //  programa de delante aguantará sin respuesta, que es lo que hacía
+        //  antes de que esto existiera.
+        self.respuestas.appendSlice(bytes) catch {};
+    }
 
     pub fn print(self: *Handler, c: u21) !void {
         try self.terminal.print(c);
@@ -341,6 +365,67 @@ const Handler = struct {
         self.terminal.fullReset();
     }
 
+    //  ── lo que hay que contestar ────────────────────────────────────────
+    //
+    //  Las respuestas son las de ghostty, copiadas de su
+    //  src/termio/stream_handler.zig para no inventarnos un terminal que no
+    //  existe: si decimos que somos un VT220 con color, más vale contestar lo
+    //  mismo que contesta él.
+
+    pub fn deviceAttributes(
+        self: *Handler,
+        req: terminal.DeviceAttributeReq,
+        params: []const u16,
+    ) !void {
+        _ = params;
+        switch (req) {
+            //  62 = nivel 2, 22 = texto en color. Sin el 52 del portapapeles:
+            //  esta capa no tiene portapapeles que ofrecer.
+            .primary => self.contestar("\x1b[?62;22c"),
+            .secondary => self.contestar("\x1b[>1;10;0c"),
+            else => {},
+        }
+    }
+
+    pub fn deviceStatusReport(
+        self: *Handler,
+        req: terminal.device_status.Request,
+    ) !void {
+        switch (req) {
+            .operating_status => self.contestar("\x1b[0n"),
+            .cursor_position => {
+                //  Con el modo origen puesto, la posición es relativa a la
+                //  región de desplazamiento y no a la pantalla.
+                const c = self.terminal.screen.cursor;
+                const x, const y = if (self.terminal.modes.get(.origin))
+                    .{ c.x -| self.terminal.scrolling_region.left,
+                       c.y -| self.terminal.scrolling_region.top }
+                else
+                    .{ c.x, c.y };
+
+                var buf: [32]u8 = undefined;
+                const resp = std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{ y + 1, x + 1 }) catch return;
+                self.contestar(resp);
+            },
+            else => {},
+        }
+    }
+
+    pub fn requestMode(self: *Handler, mode_raw: u16, ansi: bool) !void {
+        const code: u8 = code: {
+            const mode = terminal.modes.modeFromInt(mode_raw, ansi) orelse break :code 0;
+            if (self.terminal.modes.get(mode)) break :code 1;
+            break :code 2;
+        };
+        var buf: [32]u8 = undefined;
+        const resp = std.fmt.bufPrint(&buf, "\x1b[{s}{d};{d}$y", .{
+            if (ansi) "" else "?",
+            mode_raw,
+            code,
+        }) catch return;
+        self.contestar(resp);
+    }
+
     pub fn saveMode(self: *Handler, mode: terminal.Mode) !void {
         self.terminal.modes.save(mode);
     }
@@ -452,6 +537,22 @@ export fn ghostty_vt_terminal_cursor_position(
     col_out.?.* = @intCast(handle.terminal.screen.cursor.x + 1);
     row_out.?.* = @intCast(handle.terminal.screen.cursor.y + 1);
     return true;
+}
+
+//  Recoge lo que el terminal tiene pendiente de contestar y vacía la cola.
+//  Quien nos usa lo escribe en el PTY: aquí no sabemos qué es un PTY.
+export fn ghostty_vt_terminal_take_responses(terminal_ptr: ?*anyopaque) callconv(.C) ghostty_vt_bytes_t {
+    if (terminal_ptr == null) return .{ .ptr = null, .len = 0 };
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
+    if (handle.respuestas.items.len == 0) return .{ .ptr = null, .len = 0 };
+
+    const alloc = std.heap.c_allocator;
+    const copia = alloc.alloc(u8, handle.respuestas.items.len) catch {
+        return .{ .ptr = null, .len = 0 };
+    };
+    @memcpy(copia, handle.respuestas.items);
+    handle.respuestas.clearRetainingCapacity();
+    return .{ .ptr = copia.ptr, .len = copia.len };
 }
 
 export fn ghostty_vt_terminal_dump_viewport(terminal_ptr: ?*anyopaque) callconv(.C) ghostty_vt_bytes_t {

@@ -61,6 +61,9 @@ bool ghostty_vt_terminal_cursor_position(ghostty_vt_terminal_t terminal,
                                          uint16_t* col_out,
                                          uint16_t* row_out);
 
+/* Lo que el terminal tiene pendiente de contestar; vacía la cola. */
+ghostty_vt_bytes_t ghostty_vt_terminal_take_responses(ghostty_vt_terminal_t terminal);
+
 ghostty_vt_bytes_t ghostty_vt_terminal_dump_viewport(ghostty_vt_terminal_t terminal);
 ghostty_vt_bytes_t ghostty_vt_terminal_dump_viewport_row(ghostty_vt_terminal_t terminal,
                                                          uint16_t row);

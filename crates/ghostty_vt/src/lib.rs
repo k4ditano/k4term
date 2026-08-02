@@ -137,6 +137,27 @@ impl Terminal {
         }
     }
 
+    //  Lo que el terminal tiene que CONTESTAR, y que hay que escribirle al
+    //  PTY. Un terminal no solo recibe: le preguntan quién es (DA), dónde está
+    //  el cursor (DSR) o si tiene puesto un modo (DECRQM), y quien pregunta se
+    //  queda esperando por el mismo sitio por donde escribe.
+    //
+    //  Hay que llamarlo DESPUÉS de cada `feed` y escribir lo que devuelva. Si
+    //  no, esas preguntas caen al vacío y el programa de delante se queda
+    //  esperando algo que no va a llegar — que es lo que hace, por ejemplo,
+    //  que un TUI se coloque donde no debe.
+    pub fn take_responses(&mut self) -> Vec<u8> {
+        let bytes =
+            unsafe { ghostty_vt_sys::ghostty_vt_terminal_take_responses(self.ptr.as_ptr()) };
+        if bytes.ptr.is_null() {
+            return Vec::new();
+        }
+        let slice = unsafe { std::slice::from_raw_parts(bytes.ptr, bytes.len) };
+        let salida = slice.to_vec();
+        unsafe { ghostty_vt_sys::ghostty_vt_bytes_free(bytes) };
+        salida
+    }
+
     pub fn dump_viewport(&self) -> Result<String, Error> {
         let bytes = unsafe { ghostty_vt_sys::ghostty_vt_terminal_dump_viewport(self.ptr.as_ptr()) };
         if bytes.ptr.is_null() {
