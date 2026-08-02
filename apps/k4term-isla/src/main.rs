@@ -29,7 +29,7 @@
 //  Y lo que responde:
 //
 //      {"que":"marco","filas":[[{"t":"…","f":"#rrggbb","b":"#rrggbb","n":0}]],
-//       "cursor":[col,fila],"cols":90,"filas_n":16}
+//       "cursor":[col,fila],"cols":90,"filas_n":16,"scroll":[arriba,total]}
 
 use std::io::{BufRead, Read, Write};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
@@ -122,6 +122,11 @@ struct Marco {
     usadas: u16,
     //  Dónde está la sesión, para que el pie diga algo útil.
     cwd: String,
+    //  [fila por la que empieza lo que se ve, filas que hay en total], en
+    //  coordenadas del historial entero. La rejilla no es un Flickable —el
+    //  historial vive aquí, no en la barra—, así que sin estos dos números la
+    //  vista no tiene con qué dibujar la barrita de la casa.
+    scroll: [u32; 2],
 }
 
 fn hex(c: Rgb) -> String {
@@ -186,6 +191,10 @@ fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str, cwd: String) -> Ma
         .map(|i| i as u16 + 1)
         .unwrap_or(0);
 
+    //  Si el VT no sabe decirlo, se finge que no hay historial: total igual a
+    //  lo que se ve deja la barrita entera, que es como no tenerla.
+    let (arriba, total) = term.viewport_position().unwrap_or((0, u32::from(filas)));
+
     Marco {
         que: "marco",
         filas: salida,
@@ -194,6 +203,7 @@ fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str, cwd: String) -> Ma
         filas_n: filas,
         usadas: ultima.max(fila),
         cwd,
+        scroll: [arriba, total.max(u32::from(filas))],
     }
 }
 
