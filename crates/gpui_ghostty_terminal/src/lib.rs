@@ -71,6 +71,8 @@ type Listar = dyn Fn() -> Vec<Servidor> + Send + Sync;
 type AlVuelo = dyn Fn(&str) -> Option<Servidor> + Send + Sync;
 type PorAlias = dyn Fn(&str) + Send + Sync;
 type PorServidor = dyn Fn(&Servidor) + Send + Sync;
+type SinNada = dyn Fn() + Send + Sync;
+type ColorPorNombre = dyn Fn(&str) -> Option<(u8, u8, u8)> + Send + Sync;
 
 pub struct GestorServidores {
     pub listar: Box<Listar>,
@@ -82,10 +84,10 @@ pub struct GestorServidores {
     //  Entrar y salir de un sitio: quien lo sepa lo cuenta —hoy, la barra,
     //  que lo enseña en la píldora—. La vista no sabe que existe una barra.
     pub conectado: Box<PorAlias>,
-    pub desconectado: Box<dyn Fn() + Send + Sync>,
+    pub desconectado: Box<SinNada>,
     //  De nombre de color a color. Lo resuelve el anfitrión porque la paleta
     //  de la casa es suya: aquí solo se sabe mezclar.
-    pub color: Box<dyn Fn(&str) -> Option<(u8, u8, u8)> + Send + Sync>,
+    pub color: Box<ColorPorNombre>,
 }
 
 static GESTOR: std::sync::OnceLock<GestorServidores> = std::sync::OnceLock::new();
