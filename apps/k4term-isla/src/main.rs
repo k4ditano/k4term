@@ -32,6 +32,7 @@
 //       "cursor":[col,fila],"cols":90,"filas_n":16,"scroll":[arriba,total]}
 
 use std::io::{BufRead, Read, Write};
+use std::path::PathBuf;
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -424,7 +425,15 @@ fn main() {
     let mut escritor = master.take_writer().expect("escritor del pty");
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let es_fish = PathBuf::from(&shell)
+        .file_name()
+        .is_some_and(|nombre| nombre == "fish");
     let mut cmd = CommandBuilder::new(shell);
+    // See k4term: fish's optional terminal probes wait for replies that an
+    // embedded session cannot provide, delaying the first prompt by seconds.
+    if es_fish {
+        cmd.args(["--features", "no-query-term"]);
+    }
     cmd.arg("-l");
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");

@@ -207,7 +207,20 @@ fn main() {
                     let shell = ajustes.shell.clone().unwrap_or_else(|| {
                         std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
                     });
+                    let es_fish = PathBuf::from(&shell)
+                        .file_name()
+                        .is_some_and(|nombre| nombre == "fish");
                     let mut c = CommandBuilder::new(shell);
+                    // Fish 4.8 probes the terminal with XTGETTCAP, kitty
+                    // keyboard and cursor-style queries before showing its
+                    // greeting. k4term already provides the useful replies
+                    // (DSR and OSC 10/11), but not every optional probe; fish
+                    // otherwise waits several seconds for a timeout. Keep
+                    // the normal xterm-256color capabilities while disabling
+                    // only this startup probe for fish sessions.
+                    if es_fish {
+                        c.args(["--features", "no-query-term"]);
+                    }
                     c.arg("-l");
                     c
                 }

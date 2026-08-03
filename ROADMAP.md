@@ -16,6 +16,8 @@ Deliver a maintainable Rust workspace that bootstraps an embedded terminal contr
 
 ## Agent Work (Compacted)
 
+- [x] Fix fish startup delay in embedded k4term sessions by disabling unsupported terminal capability probes.
+
 - [x] M0: Workspace Bootstrap (Ghostty submodule, workspace layout, scripts, docs)
 - [x] M0.1: VT Core (Zig build + Rust sys + safe wrapper)
 - [x] M1.1: Viewport Scrolling (mouse wheel)
