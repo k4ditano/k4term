@@ -27,12 +27,12 @@ use std::time::Duration;
 use gpui::{App, AppContext, Application, KeyBinding, TitlebarOptions, WindowOptions};
 use gpui_ghostty_terminal::view::{
     Appearance, Copy, CopyLastOutput, DecreaseFontSize, Find, IncreaseFontSize, NextBlock, Paste,
-    PreviousBlock, ResetFontSize, SelectAll, SendBlockToNote, SendSessionToNote, TerminalInput,
-    TerminalView, ToIsland, ToggleQuiet,
+    PreviousBlock, ResetFontSize, SelectAll, SendBlockToNote, SendSessionToNote, Servers,
+    TerminalInput, TerminalView, ToIsland, ToggleQuiet,
 };
 use gpui_ghostty_terminal::{Rgb, TerminalConfig, TerminalSession};
 use k4term_puente::{
-    Ajustes, Aviso, Suceso, barra, edinot, osc::Escaner, tema, trabajos, traspaso,
+    Ajustes, Aviso, Suceso, barra, edinot, osc::Escaner, servidores, tema, trabajos, traspaso,
 };
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
@@ -156,6 +156,8 @@ fn main() {
             //  Devolverla a la isla, que es de donde vino o donde cabe mejor
             //  para vigilarla de reojo.
             KeyBinding::new("ctrl-shift-i", ToIsland, None),
+            //  Y los servidores de uno, sin salir de la ventana.
+            KeyBinding::new("ctrl-shift-s", Servers, None),
         ]);
 
         //  La puerta a Edinot solo se abre si Edinot está. Quien no lo tenga
@@ -169,6 +171,30 @@ fn main() {
                 });
             });
         }
+
+        //  Los servidores salen de `~/.ssh/config`, que es de quien los tiene
+        //  —no de una base de datos nuestra— y de `hosts.json` para lo que ese
+        //  fichero no sabe decir. La vista solo pinta y filtra: de dónde viene
+        //  la lista lo sabe esta capa.
+        gpui_ghostty_terminal::registrar_servidores(
+            || {
+                servidores::leer()
+                    .into_iter()
+                    .map(|s| gpui_ghostty_terminal::Servidor {
+                        detalle: s.detalle(),
+                        alias: s.alias,
+                        favorito: s.favorito,
+                    })
+                    .collect()
+            },
+            |alias| {
+                let ahora = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                servidores::visitado(&alias, ahora);
+            },
+        );
 
         //  El botón de ajustes solo existe si hay barra que los enseñe.
         if barra::hay_barra() {

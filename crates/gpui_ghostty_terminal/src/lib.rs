@@ -18,6 +18,40 @@ pub(crate) fn edinot_disponible() -> bool {
     ANOTADOR.get().is_some()
 }
 
+//  Los servidores de uno, para el selector de la ventana. La vista pinta y
+//  filtra; de dónde salen los hosts sabe el anfitrión, que es quien conoce
+//  `~/.ssh/config` — esta capa no tiene por qué.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Servidor {
+    pub alias: String,
+    pub detalle: String,
+    pub favorito: bool,
+}
+
+type Listado = dyn Fn() -> Vec<Servidor> + Send + Sync + 'static;
+static SERVIDORES: std::sync::OnceLock<Box<Listado>> = std::sync::OnceLock::new();
+
+type Visita = dyn Fn(String) + Send + Sync + 'static;
+static VISITA: std::sync::OnceLock<Box<Visita>> = std::sync::OnceLock::new();
+
+pub fn registrar_servidores(
+    lista: impl Fn() -> Vec<Servidor> + Send + Sync + 'static,
+    visita: impl Fn(String) + Send + Sync + 'static,
+) {
+    let _ = SERVIDORES.set(Box::new(lista));
+    let _ = VISITA.set(Box::new(visita));
+}
+
+pub(crate) fn servidores() -> Vec<Servidor> {
+    SERVIDORES.get().map(|f| f()).unwrap_or_default()
+}
+
+pub(crate) fn servidor_visitado(alias: &str) {
+    if let Some(f) = VISITA.get() {
+        f(alias.to_string());
+    }
+}
+
 //  Devolver la sesión a la isla. Solo existe si hay barra que la reciba: una
 //  terminal suelta no tiene isla a la que volver, y entonces la tecla no hace
 //  nada — como con Edinot.

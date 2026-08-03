@@ -29,7 +29,8 @@ actions!(
         ToggleQuiet,
         SendBlockToNote,
         SendSessionToNote,
-        ToIsland
+        ToIsland,
+        Servers
     ]
 );
 
@@ -266,6 +267,7 @@ pub struct TerminalView {
     font_size: Option<Pixels>,
     font_size_base: Option<Pixels>,
     busqueda: Option<Busqueda>,
+    servidores: Option<Servidores>,
     //  Hasta cuándo dura el destello de la campana.
     campana_hasta: Option<std::time::Instant>,
     //  Los mandatos que han pasado por aquí, en coordenadas del historial.
@@ -301,6 +303,30 @@ pub struct Bloque {
     pub inicio: u32,
     pub fin: Option<u32>,
     pub salida: Option<i32>,
+}
+
+//  El selector de servidores: lo mismo que la caja de buscar, pero eligiendo
+//  a dónde ir en vez de qué encontrar. Los hosts se piden UNA vez al abrirlo
+//  —leer un fichero en cada tecla no tiene ningún sentido— y el filtrado se
+//  hace sobre lo que ya está en memoria.
+struct Servidores {
+    patron: String,
+    todos: Vec<crate::Servidor>,
+    indice: usize,
+}
+
+impl Servidores {
+    fn filtrados(&self) -> Vec<&crate::Servidor> {
+        let q = self.patron.trim().to_lowercase();
+        self.todos
+            .iter()
+            .filter(|s| {
+                q.is_empty()
+                    || s.alias.to_lowercase().contains(&q)
+                    || s.detalle.to_lowercase().contains(&q)
+            })
+            .collect()
+    }
 }
 
 //  Buscar en el historial: el patrón que se teclea, las filas donde aparece
@@ -366,6 +392,7 @@ impl TerminalView {
             font_size: None,
             font_size_base: None,
             busqueda: None,
+            servidores: None,
             campana_hasta: None,
             bloques: Vec::new(),
             tranquilo: false,
@@ -424,6 +451,7 @@ impl TerminalView {
             font_size: None,
             font_size_base: None,
             busqueda: None,
+            servidores: None,
             campana_hasta: None,
             bloques: Vec::new(),
             tranquilo: false,
@@ -789,6 +817,93 @@ impl TerminalView {
             self.busqueda = Some(Busqueda::default());
             cx.notify();
         }
+    }
+
+    //  ── el selector de servidores ─────────────────────────────
+    //
+    //  En la isla esto es un plugin de la barra; aquí hace falta lo mismo sin
+    //  salir de la ventana, porque cuando estás trabajando en ella lo último
+    //  que quieres es irte a mirar a otro sitio. La lista sale de los mismos
+    //  ficheros: cada frontal la lee con sus ojos, pero la verdad es una.
+    fn on_servers(&mut self, _: &Servers, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.servidores.is_some() {
+            self.servidores = None;
+            cx.notify();
+            return;
+        }
+        self.servidores = Some(Servidores {
+            patron: String::new(),
+            todos: crate::servidores(),
+            indice: 0,
+        });
+        cx.notify();
+    }
+
+    fn tecla_de_servidores(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
+        match keystroke.key.as_str() {
+            "escape" => {
+                self.servidores = None;
+                cx.notify();
+                return;
+            }
+            "enter" => {
+                self.conectar_al_elegido(cx);
+                return;
+            }
+            "up" | "down" => {
+                if let Some(s) = self.servidores.as_mut() {
+                    let cuantos = s.filtrados().len();
+                    if cuantos > 0 {
+                        let arriba = keystroke.key == "up";
+                        s.indice = if arriba {
+                            s.indice.saturating_sub(1)
+                        } else {
+                            (s.indice + 1).min(cuantos - 1)
+                        };
+                    }
+                }
+                cx.notify();
+                return;
+            }
+            "backspace" => {
+                if let Some(s) = self.servidores.as_mut() {
+                    s.patron.pop();
+                    s.indice = 0;
+                }
+                cx.notify();
+                return;
+            }
+            _ => {}
+        }
+
+        if keystroke.modifiers.control || keystroke.modifiers.alt {
+            return;
+        }
+        if let Some(texto) = keystroke.key_char.as_ref()
+            && let Some(s) = self.servidores.as_mut()
+        {
+            s.patron.push_str(texto);
+            s.indice = 0;
+            cx.notify();
+        }
+    }
+
+    //  Conectar aquí es TECLEAR el mandato en la sesión que tienes delante.
+    //  No abrir otra ventana ni sustituir nada: estás en un prompt y lo que
+    //  quieres es entrar, igual que si lo hubieras escrito tú.
+    fn conectar_al_elegido(&mut self, cx: &mut Context<Self>) {
+        let elegido = self
+            .servidores
+            .as_ref()
+            .and_then(|s| s.filtrados().get(s.indice).map(|x| x.alias.clone()));
+        let Some(alias) = elegido else {
+            return;
+        };
+
+        crate::servidor_visitado(&alias);
+        self.servidores = None;
+        self.send_input_parts(&[format!("ssh {alias}\r").as_bytes()], cx);
+        cx.notify();
     }
 
     fn cerrar_busqueda(&mut self, cx: &mut Context<Self>) {
@@ -1567,6 +1682,10 @@ impl TerminalView {
         //  Con la búsqueda abierta, el teclado es suyo: lo que se escriba va
         //  al patrón y no a la shell, que si no se buscaría a ciegas mientras
         //  se le teclea a un programa por detrás.
+        if self.servidores.is_some() {
+            self.tecla_de_servidores(&keystroke, cx);
+            return;
+        }
         if self.busqueda.is_some() {
             self.tecla_de_busqueda(&keystroke, cx);
             cx.stop_propagation();
@@ -1874,6 +1993,14 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        //  Con un selector abierto, lo que se teclea es SUYO. El texto normal
+        //  no llega por `on_key_down` sino por aquí —es la vía del método de
+        //  entrada, la que hace que funcionen las teclas muertas y el CJK—,
+        //  así que sin esta guarda el filtro se escribía además en la sesión:
+        //  `trab` + Intro dejaba un precioso `trabssh trabajo` en el prompt.
+        if self.servidores.is_some() || self.busqueda.is_some() {
+            return;
+        }
         self.clear_marked_text(cx);
         self.commit_text(text, cx);
     }
@@ -3001,6 +3128,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::on_send_block_to_note))
             .on_action(cx.listener(Self::on_send_session_to_note))
             .on_action(cx.listener(Self::on_to_island))
+            .on_action(cx.listener(Self::on_servers))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -3074,6 +3202,92 @@ impl Render for TerminalView {
             //  La barra de búsqueda va por encima y no dentro del flujo: así
             //  no le quita filas a la rejilla ni la obliga a rehacerse cada
             //  vez que se abre o se cierra.
+            //  El selector de servidores, en medio y arriba: es una decisión
+            //  —tapa parte de lo que hay debajo— pero elegir a dónde ir es lo
+            //  único que estás haciendo mientras está abierto.
+            .children(self.servidores.as_ref().map(|s| {
+                let filtrados = s.filtrados();
+                let elegido = s.indice.min(filtrados.len().saturating_sub(1));
+                let radio = px(self.radio.max(10.));
+
+                let mut caja = div()
+                    .absolute()
+                    .top_8()
+                    .left_1_2()
+                    .w(px(420.))
+                    .ml(px(-210.))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_2()
+                    .rounded(radio)
+                    .bg(hsla(0., 0., 0.11, 0.97))
+                    .border_1()
+                    .border_color(hsla(0., 0., 1.0, 0.08))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .px_1()
+                            .pb_1()
+                            .child(div().text_color(hsla(0., 0., 0.56, 1.0)).child("servidor"))
+                            .child(div().text_color(gpui::white()).child(s.patron.clone())),
+                    );
+
+                if filtrados.is_empty() {
+                    //  Sin nada que enseñar, decir por qué: la lista vacía la
+                    //  primera vez no es un fallo, es que no has guardado
+                    //  ninguno todavía.
+                    caja = caja.child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_color(hsla(0., 0., 0.45, 1.0))
+                            .child(if s.todos.is_empty() {
+                                "no hay servidores en ~/.ssh/config"
+                            } else {
+                                "ninguno con ese nombre"
+                            }),
+                    );
+                }
+
+                //  Ocho como mucho: una lista más larga que la pantalla no se
+                //  lee, se recorre, y para eso está el filtro.
+                for (i, servidor) in filtrados.iter().take(8).enumerate() {
+                    let esta = i == elegido;
+                    caja = caja.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(8.))
+                            .when(esta, |d| d.bg(hsla(0., 0., 0.20, 1.0)))
+                            .child(
+                                div()
+                                    .text_color(if servidor.favorito {
+                                        hsla(0.13, 0.9, 0.6, 1.0)
+                                    } else {
+                                        hsla(0., 0., 0.5, 1.0)
+                                    })
+                                    .child(if servidor.favorito { "★" } else { "·" }),
+                            )
+                            .child(
+                                div()
+                                    .text_color(gpui::white())
+                                    .child(servidor.alias.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(hsla(0., 0., 0.5, 1.0))
+                                    .child(servidor.detalle.clone()),
+                            ),
+                    );
+                }
+
+                caja
+            }))
             .children(self.busqueda.as_ref().map(|b| {
                 let total = b.resultados.len();
                 let cuenta = if b.calculado != b.patron {
