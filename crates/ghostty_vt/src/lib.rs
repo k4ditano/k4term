@@ -85,6 +85,69 @@ impl KeyModifiers {
     }
 }
 
+//  Las siete formas de DECSCUSR. `Default` es «la que traiga la terminal de
+//  casa»: quien pinta decide, que es lo correcto — el programa no ha pedido
+//  nada.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorStyle {
+    Default,
+    BlinkingBlock,
+    SteadyBlock,
+    BlinkingUnderline,
+    SteadyUnderline,
+    BlinkingBar,
+    SteadyBar,
+}
+
+impl From<u16> for CursorStyle {
+    fn from(valor: u16) -> Self {
+        match valor {
+            1 => CursorStyle::BlinkingBlock,
+            2 => CursorStyle::SteadyBlock,
+            3 => CursorStyle::BlinkingUnderline,
+            4 => CursorStyle::SteadyUnderline,
+            5 => CursorStyle::BlinkingBar,
+            6 => CursorStyle::SteadyBar,
+            _ => CursorStyle::Default,
+        }
+    }
+}
+
+impl CursorStyle {
+    //  La figura, sin el parpadeo: bloque, subrayado o barra.
+    pub fn figura(self) -> Figura {
+        match self {
+            CursorStyle::BlinkingBlock | CursorStyle::SteadyBlock => Figura::Bloque,
+            CursorStyle::BlinkingUnderline | CursorStyle::SteadyUnderline => Figura::Subrayado,
+            CursorStyle::BlinkingBar | CursorStyle::SteadyBar => Figura::Barra,
+            CursorStyle::Default => Figura::Barra,
+        }
+    }
+
+    //  Si el programa ha pedido que parpadee. `Default` no pide nada.
+    pub fn parpadea(self) -> bool {
+        matches!(
+            self,
+            CursorStyle::BlinkingBlock | CursorStyle::BlinkingUnderline | CursorStyle::BlinkingBar
+        )
+    }
+}
+
+//  Un enlace de OSC 8 y las columnas que ocupa, ambas incluidas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hyperlink {
+    pub start_col: u16,
+    pub end_col: u16,
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Figura {
+    Bloque,
+    Subrayado,
+    Barra,
+}
+
 pub fn encode_key_named(name: &str, modifiers: KeyModifiers) -> Option<Vec<u8>> {
     if name.is_empty() {
         return None;
@@ -163,6 +226,50 @@ impl Terminal {
         let slice = unsafe { std::slice::from_raw_parts(bytes.ptr, bytes.len) };
         let salida = slice.to_vec();
         unsafe { ghostty_vt_sys::ghostty_vt_bytes_free(bytes) };
+        salida
+    }
+
+    //  La forma de cursor que pide el programa de dentro (DECSCUSR, CSI Ps SP
+    //  q). Vim la usa para decirte en qué modo estás sin escribirlo, y un
+    //  terminal que la ignora pinta siempre la misma barra.
+    pub fn cursor_style(&self) -> CursorStyle {
+        CursorStyle::from(unsafe {
+            ghostty_vt_sys::ghostty_vt_terminal_cursor_style(self.ptr.as_ptr())
+        })
+    }
+
+    //  Los enlaces (OSC 8) de una fila del hueco visible, ya en tramos. La
+    //  fila se cuenta desde 0, como en el volcado de estilos.
+    //
+    //  Va por fila entera y no por celda porque un enlace no tiene por qué
+    //  traer estilo propio: preguntar solo por el principio de cada tramo de
+    //  color se dejaría fuera los enlaces colgados de texto corriente.
+    pub fn row_hyperlinks(&self, row: u16) -> Vec<Hyperlink> {
+        let bytes =
+            unsafe { ghostty_vt_sys::ghostty_vt_terminal_row_hyperlinks(self.ptr.as_ptr(), row) };
+        if bytes.ptr.is_null() || bytes.len == 0 {
+            return Vec::new();
+        }
+        let crudo = unsafe { std::slice::from_raw_parts(bytes.ptr, bytes.len) }.to_vec();
+        unsafe { ghostty_vt_sys::ghostty_vt_bytes_free(bytes) };
+
+        let mut salida = Vec::new();
+        let mut i = 0usize;
+        while i + 6 <= crudo.len() {
+            let ini = u16::from_ne_bytes([crudo[i], crudo[i + 1]]);
+            let fin = u16::from_ne_bytes([crudo[i + 2], crudo[i + 3]]);
+            let largo = u16::from_ne_bytes([crudo[i + 4], crudo[i + 5]]) as usize;
+            i += 6;
+            if i + largo > crudo.len() {
+                break;
+            }
+            salida.push(Hyperlink {
+                start_col: ini,
+                end_col: fin,
+                uri: String::from_utf8_lossy(&crudo[i..i + largo]).into_owned(),
+            });
+            i += largo;
+        }
         salida
     }
 

@@ -26,6 +26,10 @@ const TerminalHandle = struct {
     //  único que distingue una sesión de otra cuando hay varias abiertas: sin
     //  esto, un selector solo puede decir «terminal 1, terminal 2».
     titulo: std.ArrayList(u8),
+    //  La forma que el programa de dentro pide para el cursor (DECSCUSR).
+    //  Sin esto, una terminal pinta siempre la misma barra: vim en modo normal
+    //  pide bloque, en inserción barra, y ahora se le puede hacer caso.
+    estilo_cursor: u16,
     default_fg: terminal.color.RGB,
     default_bg: terminal.color.RGB,
     viewport_top_y_screen: u32,
@@ -47,10 +51,16 @@ const TerminalHandle = struct {
         handle.* = .{
             .alloc = alloc,
             .terminal = t,
-            .handler = .{ .terminal = undefined, .respuestas = undefined, .titulo = undefined },
+            .handler = .{
+                .terminal = undefined,
+                .respuestas = undefined,
+                .titulo = undefined,
+                .estilo_cursor = undefined,
+            },
             .stream = undefined,
             .respuestas = Respuestas.init(alloc),
             .titulo = std.ArrayList(u8).init(alloc),
+            .estilo_cursor = 0,
             .default_fg = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
             .default_bg = .{ .r = 0x00, .g = 0x00, .b = 0x00 },
             .viewport_top_y_screen = 0,
@@ -59,6 +69,7 @@ const TerminalHandle = struct {
         handle.handler.terminal = &handle.terminal;
         handle.handler.respuestas = &handle.respuestas;
         handle.handler.titulo = &handle.titulo;
+        handle.handler.estilo_cursor = &handle.estilo_cursor;
         handle.stream = terminal.Stream(*Handler).init(&handle.handler);
         handle.stream.parser.osc_parser.alloc = alloc;
         return handle;
@@ -77,6 +88,7 @@ const Handler = struct {
     terminal: *terminal.Terminal,
     respuestas: *Respuestas,
     titulo: *std.ArrayList(u8),
+    estilo_cursor: *u16,
 
     fn contestar(self: *Handler, bytes: []const u8) void {
         //  Si no hay memoria para contestar, mejor callarse que caerse: el
@@ -382,6 +394,13 @@ const Handler = struct {
 
     //  El título que pide la aplicación de dentro. Se guarda el último y ya:
     //  quien lo lea decidirá si lo enseña.
+    //  CSI Ps SP q — la forma del cursor. Si este método no estuviera
+    //  declarado, el Stream de ghostty descartaría la secuencia EN SILENCIO,
+    //  que es la trampa de esta capa.
+    pub fn setCursorStyle(self: *Handler, style: terminal.CursorStyleReq) !void {
+        self.estilo_cursor.* = @intFromEnum(style);
+    }
+
     pub fn changeWindowTitle(self: *Handler, title: []const u8) !void {
         if (title.len > 512) return;
         self.titulo.clearRetainingCapacity();
@@ -569,6 +588,14 @@ export fn ghostty_vt_terminal_title(terminal_ptr: ?*anyopaque) callconv(.C) ghos
     };
     @memcpy(copia, handle.titulo.items);
     return .{ .ptr = copia.ptr, .len = copia.len };
+}
+
+//  0 por defecto, y del 1 al 6 lo que diga DECSCUSR: bloque, subrayado o
+//  barra, parpadeando o quietos.
+export fn ghostty_vt_terminal_cursor_style(terminal_ptr: ?*anyopaque) callconv(.C) u16 {
+    if (terminal_ptr == null) return 0;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
+    return handle.estilo_cursor;
 }
 
 export fn ghostty_vt_terminal_take_responses(terminal_ptr: ?*anyopaque) callconv(.C) ghostty_vt_bytes_t {
@@ -1028,6 +1055,68 @@ export fn ghostty_vt_terminal_hyperlink_at(
     const alloc = std.heap.c_allocator;
     const duped = alloc.dupe(u8, uri) catch return .{ .ptr = null, .len = 0 };
     return .{ .ptr = duped.ptr, .len = duped.len };
+}
+
+//  Los tramos de enlace (OSC 8) de una fila del hueco visible.
+//
+//  Preguntar celda a celda desde fuera costaría una llamada por columna y por
+//  marco; y preguntar solo por el principio de cada tramo de estilo no vale,
+//  porque un enlace NO tiene por qué traer estilo propio: `printf` puede
+//  colgar una dirección de un texto que se pinta igual que el de al lado. Así
+//  que se recorre la fila aquí dentro y se devuelven los tramos ya hechos.
+//
+//  Formato, uno detrás de otro: columna de inicio (u16, desde 1), columna
+//  final incluida (u16), largo del uri (u16) y el uri.
+export fn ghostty_vt_terminal_row_hyperlinks(
+    terminal_ptr: ?*anyopaque,
+    row: u16,
+) callconv(.C) ghostty_vt_bytes_t {
+    if (terminal_ptr == null) return .{ .ptr = null, .len = 0 };
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
+
+    const pt: terminal.point.Point = .{ .viewport = .{ .x = 0, .y = row } };
+    const pin = handle.terminal.screen.pages.pin(pt) orelse return .{ .ptr = null, .len = 0 };
+    const cells = pin.cells(.all);
+
+    const alloc = std.heap.c_allocator;
+    var out = std.ArrayList(u8).init(alloc);
+    errdefer out.deinit();
+
+    var uri_actual: []const u8 = &.{};
+    var inicio: usize = 0;
+
+    //  Se recorre una celda de más para poder cerrar el último tramo sin
+    //  repetir el código de cierre.
+    var i: usize = 0;
+    while (i <= cells.len) : (i += 1) {
+        var uri: []const u8 = &.{};
+        if (i < cells.len and cells[i].hyperlink) {
+            if (pin.node.data.lookupHyperlink(&cells[i])) |id| {
+                const entry = pin.node.data.hyperlink_set.get(pin.node.data.memory, id).*;
+                uri = entry.uri.offset.ptr(pin.node.data.memory)[0..entry.uri.len];
+            }
+        }
+
+        const mismo = uri.len == uri_actual.len and
+            (uri.len == 0 or std.mem.eql(u8, uri, uri_actual));
+        if (mismo) continue;
+
+        if (uri_actual.len > 0) {
+            const rec_ini: u16 = @intCast(inicio + 1);
+            const rec_fin: u16 = @intCast(i);
+            const rec_len: u16 = @intCast(uri_actual.len);
+            out.appendSlice(std.mem.asBytes(&rec_ini)) catch return .{ .ptr = null, .len = 0 };
+            out.appendSlice(std.mem.asBytes(&rec_fin)) catch return .{ .ptr = null, .len = 0 };
+            out.appendSlice(std.mem.asBytes(&rec_len)) catch return .{ .ptr = null, .len = 0 };
+            out.appendSlice(uri_actual) catch return .{ .ptr = null, .len = 0 };
+        }
+
+        uri_actual = uri;
+        inicio = i;
+    }
+
+    const slice = out.toOwnedSlice() catch return .{ .ptr = null, .len = 0 };
+    return .{ .ptr = slice.ptr, .len = slice.len };
 }
 
 export fn ghostty_vt_encode_key_named(

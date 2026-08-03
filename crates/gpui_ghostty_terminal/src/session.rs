@@ -80,6 +80,13 @@ impl TerminalSession {
         self.modes.title()
     }
 
+    //  La forma de cursor que pide el programa (DECSCUSR). La pregunta va al
+    //  VT y no al lector del chorro: es estado del terminal, no un modo que
+    //  se pueda leer de paso.
+    pub fn cursor_style(&self) -> ghostty_vt::CursorStyle {
+        self.terminal.cursor_style()
+    }
+
     pub(crate) fn window_title_updates_enabled(&self) -> bool {
         self.config.update_window_title
     }

@@ -51,7 +51,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ghostty_vt::{
-    Boton, KeyModifiers, ModeTracker, Rgb, SucesoRaton, Terminal, encode_key_named, encode_mouse,
+    Boton, Figura, KeyModifiers, ModeTracker, Rgb, SucesoRaton, Terminal, encode_key_named,
+    encode_mouse,
 };
 use k4term_puente::{Aviso, Suceso, edinot, osc::Escaner, tema, trabajos};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -146,6 +147,10 @@ enum Orden {
     //  Al prompt anterior (-1) o al siguiente (1).
     #[serde(rename = "saltar")]
     Saltar { hacia: i32 },
+    //  Plegar o desplegar la salida de un mandato, por la fila del historial
+    //  donde empieza.
+    #[serde(rename = "plegar")]
+    Plegar { fila: u32 },
     //  Buscar en el historial desde donde se está mirando. Hacia atrás (-1) o
     //  hacia delante (1).
     #[serde(rename = "buscar")]
@@ -186,6 +191,9 @@ enum Recado {
     Saltar {
         hacia: i32,
     },
+    Plegar {
+        fila: u32,
+    },
     Buscar {
         texto: String,
         hacia: i32,
@@ -199,6 +207,7 @@ enum Recado {
     Marca {
         empieza: bool,
         salida: i32,
+        mandato: String,
     },
     Ajustes(Box<k4term_puente::Ajustes>),
 }
@@ -315,6 +324,11 @@ struct Tramo {
     //  Negrita y compañía, tal como los da el VT: la barra decide qué hace
     //  con ellos.
     n: u8,
+    //  El enlace de OSC 8, si esa celda lo lleva. Es el de verdad —el que la
+    //  aplicación escondió detrás del texto—, no el que se adivina mirando si
+    //  algo parece una dirección.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    u: Option<String>,
     //  La COLUMNA por la que empieza, contando desde 1.
     //
     //  Sin esto la barra encadenaba los tramos uno detrás de otro con el ancho
@@ -331,7 +345,20 @@ struct Tramo {
 struct Marco {
     que: &'static str,
     filas: Vec<Vec<Tramo>>,
+    //  A qué fila del historial corresponde cada fila pintada. Con las salidas
+    //  recogidas la rejilla ya no es un calco del hueco visible, así que esta
+    //  correspondencia es lo único que permite seleccionar, copiar y saber qué
+    //  bloque hay debajo del ratón.
+    filas_abs: Vec<u32>,
+    //  Y cuáles de esas filas son la línea de una salida recogida, para que la
+    //  barra las pinte como lo que son y sepa que al pulsarlas se despliegan.
+    resumidas: Vec<u16>,
     cursor: [u16; 2],
+    //  La forma que pide el programa de dentro (DECSCUSR): bloque, subrayado
+    //  o barra, y si parpadea. Vim la usa para decirte en qué modo estás sin
+    //  escribirlo en ningún sitio.
+    cursor_figura: &'static str,
+    cursor_parpadea: bool,
     cols: u16,
     filas_n: u16,
     //  Hasta dónde llega lo escrito: con esto la isla puede crecer con el
@@ -365,12 +392,17 @@ struct Marco {
 
 //  Un mandato, en coordenadas del historial. El estado es el del filete:
 //  «corre» mientras no ha terminado, «bien» o «mal» según el código de salida.
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, Clone)]
 struct Bloque {
     fila: u32,
     estado: &'static str,
     //  Dónde terminó. Mientras corre no se sabe, y vale la fila de arranque.
     fin: u32,
+    //  Qué se escribió. Es lo que se lee en la línea de un bloque plegado:
+    //  «300 líneas» a secas no dice de qué.
+    mandato: String,
+    //  Si su salida está recogida ahora mismo.
+    plegado: bool,
 }
 
 fn hex(c: Rgb) -> String {
@@ -384,33 +416,74 @@ fn hex(c: Rgb) -> String {
 //  que en una pantalla de terminal es casi todo. Los espacios CON color se
 //  quedan: son la barra de estado de vim o una selección, y sin ellos la
 //  pantalla mentiría.
-fn fila_en_tramos(term: &Terminal, fila: u16, fondo: &str) -> Vec<Tramo> {
+fn fila_en_tramos(term: &Terminal, fila: u16, fondo: &str, enlaces: bool) -> Vec<Tramo> {
     let texto = term.dump_viewport_row(fila).unwrap_or_default();
     let columnas: Vec<char> = texto.chars().collect();
     let runs = term.dump_viewport_row_style_runs(fila).unwrap_or_default();
+
+    //  Los enlaces se piden por fila entera y solo si esta sesión ha visto
+    //  alguno: un OSC 8 no tiene por qué traer estilo propio —se puede colgar
+    //  de un texto que se pinta igual que el de al lado—, así que no hay
+    //  ningún cambio de color del que tirar para encontrarlo.
+    let enlaces_fila = if enlaces {
+        term.row_hyperlinks(fila)
+    } else {
+        Vec::new()
+    };
 
     let mut tramos = Vec::new();
     for run in runs {
         //  El VT cuenta columnas desde 1 y con los dos extremos dentro; aquí
         //  se indexa desde 0 y con el final fuera. Confundirlos se come la
         //  primera letra de cada tramo — «cho» en vez de «echo».
-        let ini = run.start_col.saturating_sub(1) as usize;
-        let fin = (run.end_col as usize).min(columnas.len());
-        if ini >= fin {
+        let ini = run.start_col.max(1);
+        let fin = u16::try_from(columnas.len())
+            .unwrap_or(u16::MAX)
+            .min(run.end_col);
+        if ini > fin {
             continue;
         }
-        tramos.push(Tramo {
-            t: columnas[ini..fin].iter().collect(),
-            f: hex(run.fg),
-            b: hex(run.bg),
-            n: run.flags,
-            c: run.start_col.max(1),
-        });
+
+        //  Y dentro del tramo de color, se corta otra vez por donde empieza y
+        //  acaba cada enlace: el color dice cómo se pinta y el enlace a dónde
+        //  lleva, y no tienen por qué coincidir.
+        let mut col = ini;
+        while col <= fin {
+            let enlace = enlaces_fila
+                .iter()
+                .find(|e| col >= e.start_col && col <= e.end_col);
+
+            let hasta = match enlace {
+                Some(e) => e.end_col.min(fin),
+                None => enlaces_fila
+                    .iter()
+                    .filter(|e| e.start_col > col)
+                    .map(|e| e.start_col - 1)
+                    .min()
+                    .unwrap_or(fin)
+                    .min(fin),
+            };
+
+            let desde_idx = usize::from(col - 1);
+            let hasta_idx = usize::from(hasta).min(columnas.len());
+            if desde_idx < hasta_idx {
+                tramos.push(Tramo {
+                    t: columnas[desde_idx..hasta_idx].iter().collect(),
+                    f: hex(run.fg),
+                    b: hex(run.bg),
+                    n: run.flags,
+                    u: enlace.map(|e| e.uri.clone()),
+                    c: col,
+                });
+            }
+
+            col = hasta + 1;
+        }
     }
 
     while tramos
         .last()
-        .is_some_and(|x| x.t.trim().is_empty() && x.b == fondo)
+        .is_some_and(|x| x.t.trim().is_empty() && x.b == fondo && x.u.is_none())
     {
         tramos.pop();
     }
@@ -495,21 +568,105 @@ fn texto_de(term: &Terminal, desde: u32, hasta: u32, col_desde: u16, col_hasta: 
     lineas.join("\n")
 }
 
+//  El bloque plegado al que pertenece esa fila del historial, si hay alguno.
+//  Los que corren no se pliegan: recoger algo que todavía está saliendo sería
+//  esconder justo lo que estás mirando.
+fn plegado_en(bloques: &[Bloque], fila: u32) -> Option<&Bloque> {
+    bloques
+        .iter()
+        .find(|b| b.plegado && b.fin > b.fila && fila >= b.fila && fila < b.fin)
+}
+
+//  La línea que sustituye a una salida recogida. Se compone a mano —no sale
+//  del VT, que no sabe nada de esto— y se pinta como el resto: un tramo con
+//  su color y su columna.
+fn resumen(bloque: &Bloque, fondo: &str, apagado: &str) -> Vec<Tramo> {
+    let cuantas = bloque.fin.saturating_sub(bloque.fila);
+    let mandato = bloque.mandato.trim();
+    let recortado: String = if mandato.chars().count() > 46 {
+        format!("{}…", mandato.chars().take(45).collect::<String>())
+    } else {
+        mandato.to_string()
+    };
+
+    let texto = if recortado.is_empty() {
+        format!("▸ {cuantas} líneas")
+    } else {
+        format!("▸ {recortado} · {cuantas} líneas")
+    };
+
+    vec![Tramo {
+        t: texto,
+        f: apagado.to_string(),
+        b: fondo.to_string(),
+        n: 0,
+        u: None,
+        c: 1,
+    }]
+}
+
+#[allow(clippy::too_many_arguments)]
 fn marco(
     term: &Terminal,
     cols: u16,
     filas: u16,
     fondo: &str,
+    apagado: &str,
     cwd: String,
     raton: bool,
+    enlaces: bool,
     bloques: &[Bloque],
 ) -> Marco {
     let titulo = term.title().unwrap_or_default();
-    let mut salida = Vec::with_capacity(filas as usize);
-    for f in 0..filas {
-        salida.push(fila_en_tramos(term, f, fondo));
+
+    //  Si el VT no sabe decirlo, se finge que no hay historial: total igual a
+    //  lo que se ve deja la barrita entera, que es como no tenerla.
+    let (arriba, total) = term.viewport_position().unwrap_or((0, u32::from(filas)));
+
+    //  La rejilla se compone fila a fila y NO es un calco del hueco visible:
+    //  donde hay una salida recogida se pone una línea y se salta el resto.
+    //  Por eso cada fila pintada viaja con la del historial a la que
+    //  corresponde — sin eso, la barra no podría ni seleccionar ni saber a qué
+    //  bloque pertenece lo que ve.
+    let mut salida: Vec<Vec<Tramo>> = Vec::with_capacity(filas as usize);
+    let mut filas_abs: Vec<u32> = Vec::with_capacity(filas as usize);
+    let mut resumidas: Vec<u16> = Vec::new();
+
+    let mut f: u16 = 0;
+    while f < filas {
+        let abs = arriba + u32::from(f);
+        if let Some(bloque) = plegado_en(bloques, abs) {
+            salida.push(resumen(bloque, fondo, apagado));
+            filas_abs.push(bloque.fila);
+            resumidas.push(salida.len() as u16 - 1);
+
+            //  Al otro lado del bloque. Si se sale de lo visible, aquí se
+            //  acaba la rejilla.
+            let siguiente = bloque.fin.saturating_sub(arriba);
+            if siguiente <= u32::from(f) {
+                break;
+            }
+            f = u16::try_from(siguiente).unwrap_or(filas);
+            continue;
+        }
+
+        salida.push(fila_en_tramos(term, f, fondo, enlaces));
+        filas_abs.push(abs);
+        f += 1;
     }
+
     let (col, fila) = term.cursor_position().unwrap_or((1, 1));
+
+    //  El cursor va por la fila del historial en la que está de verdad, y esa
+    //  puede haberse movido de sitio al recoger algo por encima. Se busca; si
+    //  no aparece —está dentro de lo recogido— se queda al final, que es lo
+    //  menos mentiroso.
+    let cursor_abs = arriba + u32::from(fila.saturating_sub(1));
+    let cursor_fila = filas_abs
+        .iter()
+        .position(|x| *x == cursor_abs)
+        .map(|i| i as u16 + 1)
+        .unwrap_or_else(|| salida.len().max(1) as u16);
 
     //  La última fila con algo escrito, o donde esté el cursor si va por
     //  debajo: es lo que de verdad ocupa la sesión ahora mismo.
@@ -519,10 +676,6 @@ fn marco(
         .map(|i| i as u16 + 1)
         .unwrap_or(0);
 
-    //  Si el VT no sabe decirlo, se finge que no hay historial: total igual a
-    //  lo que se ve deja la barrita entera, que es como no tenerla.
-    let (arriba, total) = term.viewport_position().unwrap_or((0, u32::from(filas)));
-
     //  Solo los bloques que caen en lo que se ve: el filete se pinta por fila
     //  de la rejilla, y mandar los quinientos de la sesión entera para pintar
     //  tres sería tirar trabajo en cada marco.
@@ -530,22 +683,32 @@ fn marco(
     let vistos: Vec<Bloque> = bloques
         .iter()
         .filter(|b| b.fila >= arriba && b.fila < abajo)
-        .copied()
+        .cloned()
         .collect();
+
+    let estilo = term.cursor_style();
 
     Marco {
         que: "marco",
         filas: salida,
-        cursor: [col, fila],
+        filas_abs,
+        resumidas,
+        cursor: [col, cursor_fila],
+        cursor_figura: match estilo.figura() {
+            Figura::Bloque => "bloque",
+            Figura::Subrayado => "subrayado",
+            Figura::Barra => "barra",
+        },
+        cursor_parpadea: estilo.parpadea(),
         cols,
         filas_n: filas,
-        usadas: ultima.max(fila),
+        usadas: ultima.max(cursor_fila),
         cwd,
         titulo,
         scroll: [arriba, total.max(u32::from(filas))],
         raton,
         bloques: vistos,
-        ultimo: bloques.last().copied(),
+        ultimo: bloques.last().cloned(),
     }
 }
 
@@ -585,6 +748,15 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
     };
 
     let mut fondo = Rgb { r: 0, g: 0, b: 0 };
+    //  El gris de la casa (`muted`) para lo que no reclama atención: la línea
+    //  de una salida recogida es eso — está ahí, no molesta, y se despliega si
+    //  la quieres. No viene en el tema porque el tema solo publica fondo y
+    //  tinta, así que va fijo; es el mismo de Theme.qml.
+    let apagado = Rgb {
+        r: 0x8e,
+        g: 0x8e,
+        b: 0x93,
+    };
     if let Some(t) = tema::leer(&tema::ruta_por_defecto()) {
         fondo = Rgb {
             r: t.fondo.r,
@@ -601,6 +773,7 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
         );
     }
     let fondo = hex(fondo);
+    let apagado = hex(apagado);
 
     let mut cols = COLS;
     let mut filas = FILAS;
@@ -749,6 +922,16 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
                     motivo,
                 });
             }
+            Ok(Recado::Plegar { fila }) => {
+                //  Se pliega por la fila donde empieza el bloque, que es lo
+                //  único que la barra puede nombrar sin ambigüedad: los
+                //  índices de la rejilla cambian en cuanto sale una línea más.
+                if let Some(bloque) = bloques.iter_mut().find(|b| b.fila == fila) {
+                    bloque.plegado = !bloque.plegado;
+                    sucio = true;
+                    desde.get_or_insert_with(Instant::now);
+                }
+            }
             Ok(Recado::Saltar { hacia }) => {
                 let (arriba, _) = term.viewport_position().unwrap_or((0, 0));
                 let destino = if hacia < 0 {
@@ -815,7 +998,7 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
                 //  La puerta a Edinot solo se abre si Edinot está, igual que
                 //  en la ventana: quien no lo tenga no se entera de que
                 //  existe y la tecla no hace nada.
-                let ultimo = bloques.last().copied();
+                let ultimo = bloques.last().cloned();
                 let (titulo, cuerpo) = if entera {
                     (
                         "Sesión de terminal".to_string(),
@@ -857,12 +1040,18 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
                     });
                 }
             }
-            Ok(Recado::Marca { empieza, salida }) => {
+            Ok(Recado::Marca {
+                empieza,
+                salida,
+                mandato,
+            }) => {
                 if empieza {
                     bloques.push(Bloque {
                         fila: fila_absoluta(&term),
                         estado: "corre",
                         fin: 0,
+                        mandato,
+                        plegado: false,
                     });
                     if bloques.len() > TOPE_BLOQUES {
                         bloques.remove(0);
@@ -899,8 +1088,10 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
                 cols,
                 filas,
                 &fondo,
+                &apagado,
                 ultimo_cwd.clone(),
                 modos.mouse_reporting_enabled(),
+                modos.hyperlinks_seen(),
                 &bloques,
             )) {
                 let mut s = salida.lock();
@@ -1051,9 +1242,14 @@ fn main() {
                     match suceso {
                         Suceso::Mandato(m) => mandato = m,
                         Suceso::Comienza => {
+                            //  El mandato se manda a las DOS partes: al motor,
+                            //  que lo enseña cuando la salida está recogida, y
+                            //  al contador de trabajos, que lo enseña en la
+                            //  píldora. Por eso se clona antes de vaciarlo.
                             let _ = tx.send(Recado::Marca {
                                 empieza: true,
                                 salida: 0,
+                                mandato: mandato.clone(),
                             });
                             let _ = avisos.send(Aviso::Empieza {
                                 mandato: std::mem::take(&mut mandato),
@@ -1063,6 +1259,7 @@ fn main() {
                             let _ = tx.send(Recado::Marca {
                                 empieza: false,
                                 salida,
+                                mandato: String::new(),
                             });
                             let _ = avisos.send(Aviso::Acaba { salida });
                         }
@@ -1208,6 +1405,9 @@ fn main() {
                 }
                 Orden::Saltar { hacia } => {
                     let _ = tx.send(Recado::Saltar { hacia });
+                }
+                Orden::Plegar { fila } => {
+                    let _ = tx.send(Recado::Plegar { fila });
                 }
                 Orden::Buscar { texto, hacia } => {
                     let _ = tx.send(Recado::Buscar { texto, hacia });

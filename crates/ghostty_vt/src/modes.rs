@@ -27,6 +27,11 @@ pub struct ModeTracker {
     mouse_sgr: bool,
     title: Option<String>,
     clipboard_write: Option<String>,
+    //  Si en esta sesión ha aparecido algún enlace de OSC 8. No es un capricho
+    //  de contabilidad: preguntarle al VT por el enlace de cada tramo cuesta
+    //  una llamada por tramo y por marco, y en una sesión que nunca ha visto
+    //  un enlace eso es trabajo tirado. Con esto, solo se pregunta si los hay.
+    hyperlinks: bool,
     tail: Vec<u8>,
 }
 
@@ -64,6 +69,10 @@ impl ModeTracker {
 
     pub fn take_clipboard_write(&mut self) -> Option<String> {
         self.clipboard_write.take()
+    }
+
+    pub fn hyperlinks_seen(&self) -> bool {
+        self.hyperlinks
     }
 
     //  Lo que hay que escribirle al PTY para pegar `texto`.
@@ -200,6 +209,12 @@ impl ModeTracker {
                 continue;
             }
 
+            //  OSC 8 ; params ; uri — un enlace. El uri lo guarda el VT en la
+            //  celda; aquí solo se apunta que los hay.
+            if ps == 8 {
+                self.hyperlinks = true;
+            }
+
             let inicio = k;
             while k < buf.len() {
                 match buf[k] {
@@ -304,6 +319,14 @@ mod tests {
         m.feed(b"\x1b]52;c;aG9sYQ==\x07");
         assert_eq!(m.take_clipboard_write().as_deref(), Some("hola"));
         assert_eq!(m.take_clipboard_write(), None);
+    }
+
+    #[test]
+    fn osc_8_is_noticed_so_the_frame_can_ask_for_links() {
+        let mut m = ModeTracker::new();
+        assert!(!m.hyperlinks_seen());
+        m.feed(b"\x1b]8;;https://ejemplo.k4\x07texto\x1b]8;;\x07");
+        assert!(m.hyperlinks_seen());
     }
 
     #[test]

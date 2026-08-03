@@ -122,3 +122,43 @@ fn cursor_relativo_y_repeticion() {
     t.feed(b"\x1b[2;1HX\x1b[3b").unwrap();
     assert_eq!(t.dump_viewport_row(1).unwrap().trim_end(), "XXXX");
 }
+
+//  DECSCUSR: la forma del cursor que pide el programa. Es de la familia de
+//  secuencias que el Stream de ghostty descarta EN SILENCIO si el handler no
+//  declara su método, así que se ejerce de verdad.
+#[test]
+fn decscusr_sets_the_cursor_style() {
+    let mut term = ghostty_vt::Terminal::new(20, 5).unwrap();
+    assert_eq!(term.cursor_style(), ghostty_vt::CursorStyle::Default);
+
+    term.feed(b"\x1b[2 q").unwrap();
+    assert_eq!(term.cursor_style(), ghostty_vt::CursorStyle::SteadyBlock);
+    assert_eq!(term.cursor_style().figura(), ghostty_vt::Figura::Bloque);
+    assert!(!term.cursor_style().parpadea());
+
+    term.feed(b"\x1b[5 q").unwrap();
+    assert_eq!(term.cursor_style(), ghostty_vt::CursorStyle::BlinkingBar);
+    assert!(term.cursor_style().parpadea());
+
+    term.feed(b"\x1b[0 q").unwrap();
+    assert_eq!(term.cursor_style(), ghostty_vt::CursorStyle::Default);
+}
+
+//  OSC 8: un enlace colgado de un texto que se pinta igual que el de al lado.
+//  Por eso se pregunta por FILA y no por el principio de cada tramo de color:
+//  aquí no hay ningún cambio de estilo del que tirar.
+#[test]
+fn osc8_links_are_reported_as_column_spans() {
+    let mut term = ghostty_vt::Terminal::new(40, 5).unwrap();
+    term.feed(b"ab\x1b]8;;https://ejemplo.k4\x1b\\ENLACE\x1b]8;;\x1b\\cd")
+        .unwrap();
+
+    let enlaces = term.row_hyperlinks(0);
+    assert_eq!(enlaces.len(), 1);
+    assert_eq!(enlaces[0].uri, "https://ejemplo.k4");
+    //  «ab» ocupa las dos primeras columnas, así que el enlace va de la 3 a la 8.
+    assert_eq!((enlaces[0].start_col, enlaces[0].end_col), (3, 8));
+
+    //  Y una fila sin enlaces no devuelve nada.
+    assert!(term.row_hyperlinks(1).is_empty());
+}

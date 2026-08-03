@@ -54,6 +54,13 @@ unsafe extern "C" {
 
     pub fn ghostty_vt_terminal_title(terminal: *mut core::ffi::c_void) -> ghostty_vt_bytes_t;
 
+    pub fn ghostty_vt_terminal_cursor_style(terminal: *mut core::ffi::c_void) -> u16;
+
+    pub fn ghostty_vt_terminal_row_hyperlinks(
+        terminal: *mut core::ffi::c_void,
+        row: u16,
+    ) -> ghostty_vt_bytes_t;
+
     pub fn ghostty_vt_terminal_take_responses(
         terminal: *mut core::ffi::c_void,
     ) -> ghostty_vt_bytes_t;

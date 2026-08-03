@@ -2751,10 +2751,34 @@ impl Element for TerminalTextElement {
                 destino
             });
 
-            Some(fill(
-                Bounds::new(pintado, size(px(2.0), line_height)),
-                cursor_color,
-            ))
+            //  La figura que pida el programa (DECSCUSR): barra al escribir,
+            //  bloque en el modo normal de vim, subrayado si lo pide. El
+            //  bloque va translúcido a propósito — tapa la letra de debajo y
+            //  así se sigue leyendo, que es lo que consigue una terminal al
+            //  invertir la celda.
+            //
+            //  El parpadeo no se atiende, y es una decisión: esta ventana solo
+            //  pide fotogramas mientras hay estela que apagar, y hacer que
+            //  parpadee sería pedirlos para siempre.
+            let ancho_celda = cell_width.unwrap_or(px(8.0));
+            let quad = match self.view.read(cx).session.cursor_style().figura() {
+                ghostty_vt::Figura::Bloque => fill(
+                    Bounds::new(pintado, size(ancho_celda, line_height)),
+                    cursor_color.opacity(0.45),
+                ),
+                ghostty_vt::Figura::Subrayado => fill(
+                    Bounds::new(
+                        point(pintado.x, pintado.y + line_height - px(2.0)),
+                        size(ancho_celda, px(2.0)),
+                    ),
+                    cursor_color,
+                ),
+                ghostty_vt::Figura::Barra => fill(
+                    Bounds::new(pintado, size(px(2.0), line_height)),
+                    cursor_color,
+                ),
+            };
+            Some(quad)
         });
 
         //  Remove expired ghosts before painting. The host keeps requesting
