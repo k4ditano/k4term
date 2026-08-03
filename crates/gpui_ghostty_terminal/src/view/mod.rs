@@ -28,7 +28,8 @@ actions!(
         CopyLastOutput,
         ToggleQuiet,
         SendBlockToNote,
-        SendSessionToNote
+        SendSessionToNote,
+        ToIsland
     ]
 );
 
@@ -718,6 +719,16 @@ impl TerminalView {
             return;
         };
         crate::anotar_en_segundo_plano(titulo, texto);
+    }
+
+    //  Devolver la sesión a la isla: se le pasa a la barra con qué repintarla
+    //  y ella se encarga del resto. Quien de verdad cambia de manos es el
+    //  descriptor del PTY, y de eso sabe el anfitrión, no la vista.
+    fn on_to_island(&mut self, _: &ToIsland, _window: &mut Window, _cx: &mut Context<Self>) {
+        if !crate::mudanza_disponible() {
+            return;
+        }
+        crate::mudar(self.session.pintura(), self.titulo_actual());
     }
 
     fn on_send_session_to_note(
@@ -2982,6 +2993,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::on_toggle_quiet))
             .on_action(cx.listener(Self::on_send_block_to_note))
             .on_action(cx.listener(Self::on_send_session_to_note))
+            .on_action(cx.listener(Self::on_to_island))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_mouse_move(cx.listener(Self::on_mouse_move))

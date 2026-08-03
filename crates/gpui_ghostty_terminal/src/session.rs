@@ -80,6 +80,17 @@ impl TerminalSession {
         self.modes.title()
     }
 
+    //  Con qué dejar esta pantalla como está en otro terminal. Es lo que se
+    //  manda al mudar la sesión de sitio: el estado del VT no viaja, así que
+    //  viaja lo que se ve.
+    pub fn pintura(&self) -> String {
+        ghostty_vt::repintar(
+            &self.terminal,
+            self.config.rows,
+            self.title().unwrap_or_default(),
+        )
+    }
+
     //  La forma de cursor que pide el programa (DECSCUSR). La pregunta va al
     //  VT y no al lector del chorro: es estado del terminal, no un modo que
     //  se pueda leer de paso.

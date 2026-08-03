@@ -11,11 +11,13 @@
 //      k4term                    abre la shell
 //      k4term -d /ruta           abre ahí
 //      k4term -e prog args…      ejecuta eso y se cierra al acabar
+//      k4term --heredar SOCKET   adopta una sesión viva que viene de la isla
 //
 //  K4TERM_MANDATO="btop" teclea un mandato al arrancar: es el gancho de las
 //  pruebas automatizadas con capturas, al estilo de la barra.
 
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -26,10 +28,12 @@ use gpui::{App, AppContext, Application, KeyBinding, TitlebarOptions, WindowOpti
 use gpui_ghostty_terminal::view::{
     Appearance, Copy, CopyLastOutput, DecreaseFontSize, Find, IncreaseFontSize, NextBlock, Paste,
     PreviousBlock, ResetFontSize, SelectAll, SendBlockToNote, SendSessionToNote, TerminalInput,
-    TerminalView, ToggleQuiet,
+    TerminalView, ToIsland, ToggleQuiet,
 };
 use gpui_ghostty_terminal::{Rgb, TerminalConfig, TerminalSession};
-use k4term_puente::{Ajustes, Aviso, Suceso, barra, edinot, osc::Escaner, tema, trabajos};
+use k4term_puente::{
+    Ajustes, Aviso, Suceso, barra, edinot, osc::Escaner, tema, trabajos, traspaso,
+};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 //  La que digan los ajustes, con los respaldos de siempre detrás: si la
@@ -65,6 +69,9 @@ enum Marca {
 struct Argumentos {
     ejecutar: Option<Vec<String>>,
     directorio: Option<PathBuf>,
+    //  Una sesión que ya existe y viene de otro sitio —de la isla— esperando
+    //  en ese socket. Con esto no se abre ninguna shell: se adopta la que hay.
+    heredar: Option<PathBuf>,
 }
 
 fn argumentos() -> Argumentos {
@@ -86,9 +93,16 @@ fn argumentos() -> Argumentos {
         .map(PathBuf::from)
         .filter(|d| d.is_dir());
 
+    let heredar = argv[..hasta]
+        .iter()
+        .position(|a| a == "--heredar")
+        .and_then(|i| argv.get(i + 1))
+        .map(PathBuf::from);
+
     Argumentos {
         ejecutar,
         directorio,
+        heredar,
     }
 }
 
@@ -135,6 +149,9 @@ fn main() {
             KeyBinding::new("ctrl-shift-q", ToggleQuiet, None),
             KeyBinding::new("ctrl-shift-n", SendBlockToNote, None),
             KeyBinding::new("ctrl-shift-m", SendSessionToNote, None),
+            //  Devolverla a la isla, que es de donde vino o donde cabe mejor
+            //  para vigilarla de reojo.
+            KeyBinding::new("ctrl-shift-i", ToIsland, None),
         ]);
 
         //  La puerta a Edinot solo se abre si Edinot está. Quien no lo tenga
@@ -185,73 +202,174 @@ fn main() {
                 config.default_bg = rgb(t.fondo);
             }
 
-            let pty_system = native_pty_system();
-            let pty_pair = pty_system
-                .openpty(PtySize {
-                    rows: config.rows,
-                    cols: config.cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .expect("no se pudo abrir el pty");
+            //  Dos maneras de tener sesión: abrir una shell nuestra, o adoptar
+            //  la que viene de la isla. Adoptar no es abrir otra igual — es
+            //  que el shell de dentro, y el agente que esté pensando, y el
+            //  `make` a medias, sigan sin enterarse de nada: lo que cambia de
+            //  manos es el maestro del PTY, y a ellos lo que los ata es el
+            //  esclavo, que no se toca.
+            let heredada = args
+                .heredar
+                .as_deref()
+                .and_then(|ruta| match traspaso::recoger(ruta) {
+                    Ok(par) => Some(par),
+                    Err(fallo) => {
+                        eprintln!("k4term: no se pudo heredar la sesión: {fallo}");
+                        None
+                    }
+                });
 
-            let master: Arc<dyn portable_pty::MasterPty + Send> = Arc::from(pty_pair.master);
+            let mut pty_reader: Box<dyn Read + Send>;
+            let mut pty_writer: Box<dyn Write + Send>;
+            //  Redimensionar es lo único que hace falta del PTY además de leer
+            //  y escribir. Va en un `Rc` y no en un `Arc` porque solo lo llama
+            //  la vista, que vive en el hilo de la interfaz — y porque el
+            //  maestro de la biblioteca no se puede compartir entre hilos.
+            let medir: std::rc::Rc<dyn Fn(u16, u16)>;
+            //  El descriptor del maestro: lo que se pasa a la isla si un día
+            //  esta sesión se muda.
+            let fd_maestro: std::os::fd::RawFd;
+            //  Con qué dejar la pantalla como estaba. Solo hay algo cuando la
+            //  sesión viene de fuera: el VT del que la suelta no viaja.
+            let mut pintura = String::new();
 
-            let mut cmd = match &args.ejecutar {
-                Some(resto) => {
-                    let mut c = CommandBuilder::new(&resto[0]);
-                    c.args(&resto[1..]);
-                    c
+            match heredada {
+                Some((maestro, equipaje)) => {
+                    let lector = std::fs::File::from(
+                        maestro.try_clone().expect("copia del maestro para leer"),
+                    );
+                    let escritor = std::fs::File::from(
+                        maestro
+                            .try_clone()
+                            .expect("copia del maestro para escribir"),
+                    );
+                    pty_reader = Box::new(lector);
+                    pty_writer = Box::new(escritor);
+                    pintura = equipaje.pintura;
+                    fd_maestro = maestro.as_raw_fd();
+
+                    //  El descriptor se queda vivo dentro de este cierre: si
+                    //  se soltara, el shell de dentro recibiría un cuelgue.
+                    medir = std::rc::Rc::new(move |cols, rows| {
+                        traspaso::medir(maestro.as_raw_fd(), cols, rows);
+                    });
                 }
                 None => {
-                    let shell = ajustes.shell.clone().unwrap_or_else(|| {
-                        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
-                    });
-                    let es_fish = PathBuf::from(&shell)
-                        .file_name()
-                        .is_some_and(|nombre| nombre == "fish");
-                    let mut c = CommandBuilder::new(shell);
-                    // Fish 4.8 probes the terminal with XTGETTCAP, kitty
-                    // keyboard and cursor-style queries before showing its
-                    // greeting. k4term already provides the useful replies
-                    // (DSR and OSC 10/11), but not every optional probe; fish
-                    // otherwise waits several seconds for a timeout. Keep
-                    // the normal xterm-256color capabilities while disabling
-                    // only this startup probe for fish sessions.
-                    if es_fish {
-                        c.args(["--features", "no-query-term"]);
+                    let pty_system = native_pty_system();
+                    let pty_pair = pty_system
+                        .openpty(PtySize {
+                            rows: config.rows,
+                            cols: config.cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        })
+                        .expect("no se pudo abrir el pty");
+
+                    let master: Arc<dyn portable_pty::MasterPty + Send> =
+                        Arc::from(pty_pair.master);
+
+                    let mut cmd = match &args.ejecutar {
+                        Some(resto) => {
+                            let mut c = CommandBuilder::new(&resto[0]);
+                            c.args(&resto[1..]);
+                            c
+                        }
+                        None => {
+                            let shell = ajustes.shell.clone().unwrap_or_else(|| {
+                                std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+                            });
+                            let es_fish = PathBuf::from(&shell)
+                                .file_name()
+                                .is_some_and(|nombre| nombre == "fish");
+                            let mut c = CommandBuilder::new(shell);
+                            // Fish 4.8 probes the terminal with XTGETTCAP, kitty
+                            // keyboard and cursor-style queries before showing its
+                            // greeting. k4term already provides the useful replies
+                            // (DSR and OSC 10/11), but not every optional probe; fish
+                            // otherwise waits several seconds for a timeout. Keep
+                            // the normal xterm-256color capabilities while disabling
+                            // only this startup probe for fish sessions.
+                            if es_fish {
+                                c.args(["--features", "no-query-term"]);
+                            }
+                            c.arg("-l");
+                            c
+                        }
+                    };
+                    cmd.env("TERM", "xterm-256color");
+                    cmd.env("COLORTERM", "truecolor");
+                    cmd.env("TERM_PROGRAM", "k4term");
+                    if let Some(d) = directorio_inicial(args.directorio) {
+                        cmd.cwd(d);
                     }
-                    c.arg("-l");
-                    c
+
+                    let mut child = pty_pair
+                        .slave
+                        .spawn_command(cmd)
+                        .expect("no arrancó la shell");
+
+                    thread::spawn(move || {
+                        let _ = child.wait();
+                        // Lo que estuviera corriendo se va con la ventana: que la
+                        // barra no se quede con el indicador de un muerto.
+                        barra::limpiar(std::process::id());
+                        // Muere la shell (o el mandato de -e), muere la ventana: el
+                        // contrato de toda terminal.
+                        std::process::exit(0);
+                    });
+
+                    pty_reader = Box::new(master.try_clone_reader().expect("lector del pty"));
+                    pty_writer = Box::new(master.take_writer().expect("escritor del pty"));
+                    fd_maestro = master.as_raw_fd().unwrap_or(-1);
+
+                    //  El maestro se queda vivo dentro del cierre: soltarlo
+                    //  cerraría el descriptor y la shell recibiría un cuelgue.
+                    let master_para_medir = master.clone();
+                    medir = std::rc::Rc::new(move |cols, rows| {
+                        let _ = master_para_medir.resize(PtySize {
+                            rows,
+                            cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
+                    });
                 }
-            };
-            cmd.env("TERM", "xterm-256color");
-            cmd.env("COLORTERM", "truecolor");
-            cmd.env("TERM_PROGRAM", "k4term");
-            if let Some(d) = directorio_inicial(args.directorio) {
-                cmd.cwd(d);
             }
 
-            let mut child = pty_pair
-                .slave
-                .spawn_command(cmd)
-                .expect("no arrancó la shell");
-
-            thread::spawn(move || {
-                let _ = child.wait();
-                // Lo que estuviera corriendo se va con la ventana: que la
-                // barra no se quede con el indicador de un muerto.
-                barra::limpiar(std::process::id());
-                // Muere la shell (o el mandato de -e), muere la ventana: el
-                // contrato de toda terminal.
-                std::process::exit(0);
-            });
-
-            let mut pty_reader = master.try_clone_reader().expect("lector del pty");
-            let mut pty_writer = master.take_writer().expect("escritor del pty");
+            //  La puerta de vuelta a la isla, que solo tiene sentido si hay
+            //  isla: se le ofrece la sesión por un socket y se le dice a la
+            //  barra dónde recogerla. La ventana se va en cuanto se la lleven
+            //  —no antes—, que hasta ese momento la sesión sigue siendo suya.
+            if barra::hay_barra() {
+                gpui_ghostty_terminal::registrar_mudanza(move |pintura, titulo| {
+                    let equipaje = k4term_puente::Equipaje {
+                        titulo,
+                        pintura,
+                        ..Default::default()
+                    };
+                    match traspaso::ofrecer(fd_maestro, &equipaje) {
+                        Ok((ruta, aviso)) => {
+                            barra::adoptar(&ruta.to_string_lossy());
+                            thread::spawn(move || {
+                                if aviso.recv().unwrap_or(false) {
+                                    std::process::exit(0);
+                                }
+                            });
+                        }
+                        Err(fallo) => barra::decir("No se pudo mover la sesión", &fallo),
+                    }
+                });
+            }
 
             let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>();
             let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>();
+
+            //  Lo primero que ve el VT nuevo es la pantalla que traía la
+            //  sesión: va por el mismo canal que el PTY porque para el
+            //  terminal es lo mismo, bytes que pintar.
+            if !pintura.is_empty() {
+                let _ = stdout_tx.send(std::mem::take(&mut pintura).into_bytes());
+            }
 
             if let Ok(mandato) = std::env::var("K4TERM_MANDATO") {
                 let stdin_tx = stdin_tx.clone();
@@ -327,6 +445,13 @@ fn main() {
                         break;
                     }
                 }
+
+                //  Se acabó el chorro: o la shell ha terminado, o el otro
+                //  extremo se ha cerrado. Con una sesión heredada no hay hijo
+                //  a quien esperar —lo adoptó el sistema al soltarla—, así que
+                //  este es el único aviso de que aquí ya no queda nada.
+                barra::limpiar(std::process::id());
+                std::process::exit(0);
             });
 
             let view = cx.new(|cx| {
@@ -349,15 +474,8 @@ fn main() {
                     vista.set_tranquilo(true, cx);
                 }
 
-                let master_para_resize = master.clone();
-                vista.set_on_resize(move |cols, rows| {
-                    let _ = master_para_resize.resize(PtySize {
-                        rows,
-                        cols,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    });
-                });
+                let medir_al_cambiar = medir.clone();
+                vista.set_on_resize(move |cols, rows| medir_al_cambiar(cols, rows));
 
                 vista
             });

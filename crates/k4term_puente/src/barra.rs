@@ -102,3 +102,9 @@ pub fn abrir_ajustes() {
 pub fn decir(titulo: &str, cuerpo: &str) {
     llamar(&["decir", titulo, cuerpo]);
 }
+
+//  «Llévate esta sesión»: la barra abre una terminal en la isla que se la
+//  queda por ese socket. Lo que corre dentro no se entera de nada.
+pub fn adoptar(socket: &str) {
+    llamar(&["adoptar", socket]);
+}

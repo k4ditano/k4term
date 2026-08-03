@@ -12,8 +12,10 @@ pub mod edinot;
 pub mod osc;
 pub mod tema;
 pub mod trabajos;
+pub mod traspaso;
 
 pub use ajustes::Ajustes;
 pub use osc::{Escaner, Suceso};
 pub use tema::Tema;
 pub use trabajos::Aviso;
+pub use traspaso::Equipaje;

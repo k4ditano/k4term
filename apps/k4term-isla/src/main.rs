@@ -45,6 +45,7 @@
 //      {"que":"aviso","texto":"…"}               un recado para el usuario
 
 use std::io::{BufRead, Read, Write};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::thread;
@@ -54,7 +55,7 @@ use ghostty_vt::{
     Boton, Figura, KeyModifiers, ModeTracker, Rgb, SucesoRaton, Terminal, encode_key_named,
     encode_mouse,
 };
-use k4term_puente::{Aviso, Suceso, edinot, osc::Escaner, tema, trabajos};
+use k4term_puente::{Aviso, Suceso, edinot, osc::Escaner, tema, trabajos, traspaso};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 
@@ -151,6 +152,10 @@ enum Orden {
     //  donde empieza.
     #[serde(rename = "plegar")]
     Plegar { fila: u32 },
+    //  Soltar la sesión para que se la lleve una ventana. Lo que corre dentro
+    //  no se entera: lo que cambia de manos es el maestro del PTY.
+    #[serde(rename = "emigrar")]
+    Emigrar,
     //  Buscar en el historial desde donde se está mirando. Hacia atrás (-1) o
     //  hacia delante (1).
     #[serde(rename = "buscar")]
@@ -194,6 +199,7 @@ enum Recado {
     Plegar {
         fila: u32,
     },
+    Emigrar,
     Buscar {
         texto: String,
         hacia: i32,
@@ -259,6 +265,13 @@ struct Donde {
 struct Portapapeles {
     que: &'static str,
     texto: String,
+}
+
+//  «Ahí tienes la sesión»: por ese socket se la puede llevar quien quiera.
+#[derive(Serialize)]
+struct Emigrando {
+    que: &'static str,
+    socket: String,
 }
 
 //  Un recado suelto para el usuario: la terminal de la isla no tiene dónde
@@ -740,7 +753,12 @@ fn decir_config(salida: &std::io::Stdout, ajustes: &k4term_puente::Ajustes) {
 //  pantalla está lo bastante quieta y manda la foto.
 //  El directorio se mira al pintar y no en cada byte: es una lectura de
 //  /proc, barata, pero no hay por qué hacerla cincuenta veces por `ls`.
-fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<Vec<u8>>) {
+fn motor(
+    rx: std::sync::mpsc::Receiver<Recado>,
+    pid_shell: u32,
+    al_pty: Sender<Vec<u8>>,
+    maestro: RawFd,
+) {
     let mut ultimo_cwd = String::new();
     let mut term = match Terminal::new(COLS, FILAS) {
         Ok(t) => t,
@@ -921,6 +939,40 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
                     texto: texto_de(&term, d, hasta, col_desde, col_hasta),
                     motivo,
                 });
+            }
+            Ok(Recado::Emigrar) => {
+                //  El equipaje lo compone quien tiene el VT delante: dónde
+                //  está, cómo se llama, de qué tamaño iba y con qué repintar.
+                let equipaje = traspaso::Equipaje {
+                    cwd: directorio(pid_shell).unwrap_or_default(),
+                    titulo: term.title().unwrap_or_default(),
+                    cols,
+                    filas,
+                    pintura: ghostty_vt::repintar(&term, filas, &term.title().unwrap_or_default()),
+                };
+
+                match traspaso::ofrecer(maestro, &equipaje) {
+                    Ok((ruta, aviso)) => {
+                        decir(&Emigrando {
+                            que: "emigrando",
+                            socket: ruta.to_string_lossy().into_owned(),
+                        });
+
+                        //  A partir de aquí esta sesión ya no es nuestra: en
+                        //  cuanto se la lleven, este proceso sobra. El shell
+                        //  no se toca —lo adopta el sistema— y sigue vivo
+                        //  porque el otro lado tiene su copia del maestro.
+                        thread::spawn(move || {
+                            if aviso.recv().unwrap_or(false) {
+                                std::process::exit(0);
+                            }
+                        });
+                    }
+                    Err(fallo) => decir(&AvisoDicho {
+                        que: "aviso",
+                        texto: fallo,
+                    }),
+                }
             }
             Ok(Recado::Plegar { fila }) => {
                 //  Se pliega por la fila donde empieza el bloque, que es lo
@@ -1105,41 +1157,115 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
     }
 }
 
+//  El maestro del PTY, venga de donde venga: abierto por nosotros o heredado
+//  de otro frontal. Lo único que se le pide es leer, escribir y cambiar de
+//  tamaño, y eso se puede hacer igual con los dos.
+enum Maestro {
+    Propio(Box<dyn portable_pty::MasterPty + Send>),
+    Heredado(OwnedFd),
+}
+
+impl Maestro {
+    fn fd(&self) -> RawFd {
+        match self {
+            Maestro::Propio(m) => m.as_raw_fd().unwrap_or(-1),
+            Maestro::Heredado(fd) => fd.as_raw_fd(),
+        }
+    }
+
+    fn lector(&self) -> Box<dyn Read + Send> {
+        match self {
+            Maestro::Propio(m) => m.try_clone_reader().expect("lector del pty"),
+            Maestro::Heredado(fd) => Box::new(std::fs::File::from(
+                fd.try_clone().expect("copia para leer"),
+            )),
+        }
+    }
+
+    fn escritor(&self) -> Box<dyn Write + Send> {
+        match self {
+            Maestro::Propio(m) => m.take_writer().expect("escritor del pty"),
+            Maestro::Heredado(fd) => Box::new(std::fs::File::from(
+                fd.try_clone().expect("copia para escribir"),
+            )),
+        }
+    }
+
+    fn medir(&self, cols: u16, filas: u16) {
+        match self {
+            Maestro::Propio(m) => {
+                let _ = m.resize(PtySize {
+                    rows: filas,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
+            }
+            Maestro::Heredado(fd) => traspaso::medir(fd.as_raw_fd(), cols, filas),
+        }
+    }
+}
+
 fn main() {
-    let pty = native_pty_system();
-    let par = pty
-        .openpty(PtySize {
-            rows: FILAS,
-            cols: COLS,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("no se pudo abrir el pty");
+    //  Una sesión que ya existe esperando en un socket: viene de una ventana
+    //  que la devuelve a la isla. Con esto no se abre ninguna shell.
+    let argv: Vec<String> = std::env::args().collect();
+    let heredar = argv
+        .iter()
+        .position(|a| a == "--heredar")
+        .and_then(|i| argv.get(i + 1))
+        .map(PathBuf::from);
 
-    let master = par.master;
-    let mut lector = master.try_clone_reader().expect("lector del pty");
-    let mut escritor = master.take_writer().expect("escritor del pty");
+    let (maestro, mut hijo, pid_shell, pintura) = match heredar {
+        Some(ruta) => match traspaso::recoger(&ruta) {
+            Ok((fd, equipaje)) => (Maestro::Heredado(fd), None, 0, equipaje.pintura),
+            Err(fallo) => {
+                eprintln!("k4term-isla: no se pudo heredar la sesión: {fallo}");
+                std::process::exit(1);
+            }
+        },
+        None => {
+            let pty = native_pty_system();
+            let par = pty
+                .openpty(PtySize {
+                    rows: FILAS,
+                    cols: COLS,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .expect("no se pudo abrir el pty");
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-    let es_fish = PathBuf::from(&shell)
-        .file_name()
-        .is_some_and(|nombre| nombre == "fish");
-    let mut cmd = CommandBuilder::new(shell);
-    // See k4term: fish's optional terminal probes wait for replies that an
-    // embedded session cannot provide, delaying the first prompt by seconds.
-    if es_fish {
-        cmd.args(["--features", "no-query-term"]);
-    }
-    cmd.arg("-l");
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-    cmd.env("TERM_PROGRAM", "k4term");
-    if let Ok(home) = std::env::var("HOME") {
-        cmd.cwd(home);
-    }
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+            let es_fish = PathBuf::from(&shell)
+                .file_name()
+                .is_some_and(|nombre| nombre == "fish");
+            let mut cmd = CommandBuilder::new(shell);
+            // See k4term: fish's optional terminal probes wait for replies that an
+            // embedded session cannot provide, delaying the first prompt by seconds.
+            if es_fish {
+                cmd.args(["--features", "no-query-term"]);
+            }
+            cmd.arg("-l");
+            cmd.env("TERM", "xterm-256color");
+            cmd.env("COLORTERM", "truecolor");
+            cmd.env("TERM_PROGRAM", "k4term");
+            if let Ok(home) = std::env::var("HOME") {
+                cmd.cwd(home);
+            }
 
-    let mut hijo = par.slave.spawn_command(cmd).expect("no arrancó la shell");
-    let pid_shell = hijo.process_id().unwrap_or(0);
+            let hijo = par.slave.spawn_command(cmd).expect("no arrancó la shell");
+            let pid = hijo.process_id().unwrap_or(0);
+            (Maestro::Propio(par.master), Some(hijo), pid, String::new())
+        }
+    };
+
+    let mut lector = maestro.lector();
+    let mut escritor = maestro.escritor();
+    let fd_maestro = maestro.fd();
+
+    //  Con una sesión heredada no hay hijo al que esperar, así que el final lo
+    //  marca el lector cuando se acaba el chorro.
+    let (fin_tx, fin) = channel::<()>();
 
     // ── el que escribe en el PTY ──────────────────────────────────
     //
@@ -1159,7 +1285,14 @@ fn main() {
     let (tx, rx) = channel::<Recado>();
     {
         let al_pty = al_pty.clone();
-        thread::spawn(move || motor(rx, pid_shell, al_pty));
+        thread::spawn(move || motor(rx, pid_shell, al_pty, fd_maestro));
+    }
+
+    //  Y si la sesión viene de otro sitio, lo primero que ve su VT nuevo es la
+    //  pantalla que traía: para el terminal es lo mismo que si lo hubiera
+    //  escupido el PTY.
+    if !pintura.is_empty() {
+        let _ = tx.send(Recado::Bytes(pintura.into_bytes()));
     }
 
     // ── los ajustes, en caliente ──────────────────────────────────
@@ -1281,6 +1414,8 @@ fn main() {
                     break;
                 }
             }
+
+            let _ = fin_tx.send(());
         });
     }
 
@@ -1320,12 +1455,7 @@ fn main() {
                 Orden::Medida { cols, filas } => {
                     let cols = cols.max(20);
                     let filas = filas.max(4);
-                    let _ = master.resize(PtySize {
-                        rows: filas,
-                        cols,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    });
+                    maestro.medir(cols, filas);
                     let _ = tx.send(Recado::Medida { cols, filas });
                 }
                 Orden::Pinta => {
@@ -1409,6 +1539,9 @@ fn main() {
                 Orden::Plegar { fila } => {
                     let _ = tx.send(Recado::Plegar { fila });
                 }
+                Orden::Emigrar => {
+                    let _ = tx.send(Recado::Emigrar);
+                }
                 Orden::Buscar { texto, hacia } => {
                     let _ = tx.send(Recado::Buscar { texto, hacia });
                 }
@@ -1420,5 +1553,15 @@ fn main() {
         std::process::exit(0);
     });
 
-    let _ = hijo.wait();
+    //  El final: si la shell es hija nuestra, se la espera; si la sesión vino
+    //  heredada no hay a quién esperar —la adoptó el sistema al soltarla— y lo
+    //  que marca el final es que se acabe el chorro.
+    match hijo.as_mut() {
+        Some(h) => {
+            let _ = h.wait();
+        }
+        None => {
+            let _ = fin.recv();
+        }
+    }
 }

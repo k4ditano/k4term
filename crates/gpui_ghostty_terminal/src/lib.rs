@@ -18,6 +18,28 @@ pub(crate) fn edinot_disponible() -> bool {
     ANOTADOR.get().is_some()
 }
 
+//  Devolver la sesión a la isla. Solo existe si hay barra que la reciba: una
+//  terminal suelta no tiene isla a la que volver, y entonces la tecla no hace
+//  nada — como con Edinot.
+type Mudanza = dyn Fn(String, String) + Send + Sync + 'static;
+static MUDANZA: std::sync::OnceLock<Box<Mudanza>> = std::sync::OnceLock::new();
+
+pub fn registrar_mudanza(f: impl Fn(String, String) + Send + Sync + 'static) {
+    let _ = MUDANZA.set(Box::new(f));
+}
+
+pub(crate) fn mudanza_disponible() -> bool {
+    MUDANZA.get().is_some()
+}
+
+//  La pintura de la pantalla y el título, que es lo que hace falta para que
+//  la sesión aparezca al otro lado tal como estaba.
+pub(crate) fn mudar(pintura: String, titulo: String) {
+    if let Some(f) = MUDANZA.get() {
+        f(pintura, titulo);
+    }
+}
+
 //  Abrir los Ajustes de la casa. Igual que con Edinot: si nadie lo registra,
 //  el botón ni se pinta — una terminal suelta no tiene dónde mandarte.
 type Abridor = dyn Fn() + Send + Sync + 'static;
