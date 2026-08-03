@@ -725,6 +725,13 @@ impl TerminalView {
     //  y ella se encarga del resto. Quien de verdad cambia de manos es el
     //  descriptor del PTY, y de eso sabe el anfitrión, no la vista.
     fn on_to_island(&mut self, _: &ToIsland, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.a_la_isla();
+    }
+
+    //  Lo mismo, pero llamable desde fuera de una tecla: la barra toca el
+    //  timbre de la ventana cuando el gesto se hace desde el compositor, y
+    //  entonces no hay ninguna acción de por medio.
+    pub fn a_la_isla(&mut self) {
         if !crate::mudanza_disponible() {
             return;
         }

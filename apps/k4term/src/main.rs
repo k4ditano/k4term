@@ -121,7 +121,11 @@ fn directorio_inicial(pedido: Option<PathBuf>) -> Option<PathBuf> {
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    //  El timbre, antes que nada: la máscara de señales se hereda, así que
+    //  esto tiene que estar puesto antes de que GPUI levante sus hilos.
+    let timbre = k4term_puente::senal::escuchar();
+
+    Application::new().run(move |cx: &mut App| {
         let ajustes = Ajustes::leer();
 
         cx.bind_keys([
@@ -503,6 +507,9 @@ fn main() {
                         let marcas: Vec<Marca> =
                             std::iter::from_fn(|| marcas_rx.try_recv().ok()).collect();
                         let ajuste_nuevo = std::iter::from_fn(|| cambios.try_recv().ok()).last();
+                        //  ¿Han llamado a la puerta? Es la barra diciendo
+                        //  «devuélvete a la isla».
+                        let llaman = std::iter::from_fn(|| timbre.try_recv().ok()).count() > 0;
 
                         //  `apagando` mantiene vivo el bucle mientras dure el
                         //  destello: sin salida nueva nadie volvería a pedir
@@ -510,6 +517,9 @@ fn main() {
                         let mut apagando = false;
                         cx.update(|_, cx| {
                             view_for_task.update(cx, |this, cx| {
+                                if llaman {
+                                    this.a_la_isla();
+                                }
                                 apagando = this.campana_encendida(cx);
                                 //  El cursor deslizándose también pide seguir
                                 //  pintando aunque no llegue nada nuevo.

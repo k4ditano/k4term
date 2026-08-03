@@ -10,6 +10,7 @@ pub mod ajustes;
 pub mod barra;
 pub mod edinot;
 pub mod osc;
+pub mod senal;
 pub mod tema;
 pub mod trabajos;
 pub mod traspaso;
