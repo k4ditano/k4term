@@ -30,14 +30,19 @@
 //      {"que":"rueda","lineas":-3,"col":1,"fila":1}
 //      {"que":"texto_de","desde":10,"hasta":0}   historial en texto plano
 //      {"que":"saltar","hacia":-1}               al prompt anterior
+//      {"que":"buscar","texto":"error","hacia":-1}
+//      {"que":"nota","entera":false}             a la nota del día, si hay
 //
 //  Y lo que responde:
 //
 //      {"que":"marco","filas":[[{"t":"…","f":"#rrggbb","b":"#rrggbb","n":0}]],
 //       "cursor":[col,fila],"cols":90,"filas_n":16,"scroll":[arriba,total],
-//       "raton":false,"bloques":[{"fila":120,"estado":"bien","fin":126}]}
+//       "raton":false,"bloques":[{"fila":120,"estado":"bien","fin":126}],
+//       "ultimo":{"fila":120,"estado":"bien","fin":126}}
 //      {"que":"portapapeles","texto":"…"}        lo copió la aplicación
-//      {"que":"texto","texto":"…"}               lo pedido con `texto_de`
+//      {"que":"texto","texto":"…","motivo":"…"}  lo pedido con `texto_de`
+//      {"que":"buscado","hay":true,"fila":97}    dónde cayó la búsqueda
+//      {"que":"aviso","texto":"…"}               un recado para el usuario
 
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
@@ -48,7 +53,7 @@ use std::time::{Duration, Instant};
 use ghostty_vt::{
     Boton, KeyModifiers, ModeTracker, Rgb, SucesoRaton, Terminal, encode_key_named, encode_mouse,
 };
-use k4term_puente::{Aviso, Suceso, osc::Escaner, tema, trabajos};
+use k4term_puente::{Aviso, Suceso, edinot, osc::Escaner, tema, trabajos};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 
@@ -141,6 +146,13 @@ enum Orden {
     //  Al prompt anterior (-1) o al siguiente (1).
     #[serde(rename = "saltar")]
     Saltar { hacia: i32 },
+    //  Buscar en el historial desde donde se está mirando. Hacia atrás (-1) o
+    //  hacia delante (1).
+    #[serde(rename = "buscar")]
+    Buscar { texto: String, hacia: i32 },
+    //  A la nota del día: el último mandato con su salida, o la sesión entera.
+    #[serde(rename = "nota")]
+    Nota { entera: bool },
 }
 
 enum Recado {
@@ -173,6 +185,13 @@ enum Recado {
     //  único que tiene las marcas y el historial en las mismas coordenadas.
     Saltar {
         hacia: i32,
+    },
+    Buscar {
+        texto: String,
+        hacia: i32,
+    },
+    Nota {
+        entera: bool,
     },
     //  Un mandato empieza o termina, visto en el chorro. Llega por el mismo
     //  canal que los bytes y DESPUÉS que ellos, así que el cursor ya está
@@ -233,6 +252,14 @@ struct Portapapeles {
     texto: String,
 }
 
+//  Un recado suelto para el usuario: la terminal de la isla no tiene dónde
+//  decir «guardado» sin taparse a sí misma, así que lo dice la barra.
+#[derive(Serialize)]
+struct AvisoDicho {
+    que: &'static str,
+    texto: String,
+}
+
 //  Un trozo del historial en texto plano, que es lo que se copia y lo que se
 //  manda a una nota. Se pide por filas del historial y no del hueco visible:
 //  lo que se ve cambia de sitio en cuanto sigue saliendo salida.
@@ -241,6 +268,16 @@ struct Texto {
     que: &'static str,
     texto: String,
     motivo: String,
+}
+
+//  El resultado de una búsqueda: por qué fila del historial andaba y si
+//  había algo. Lo que se pinta amarillo lo resuelve la vista con lo que ve;
+//  aquí solo se contesta a dónde ir, que es lo que hace falta el historial.
+#[derive(Serialize)]
+struct Buscado {
+    que: &'static str,
+    hay: bool,
+    fila: u32,
 }
 
 //  Lo que la vista necesita saber de los ajustes de k4term. Se le manda desde
@@ -391,6 +428,13 @@ fn fila_absoluta(term: &Terminal) -> u32 {
     let (arriba, _) = term.viewport_position().unwrap_or((0, 0));
     let (_, fila) = term.cursor_position().unwrap_or((1, 1));
     arriba + u32::from(fila.saturating_sub(1))
+}
+
+//  ¿Está eso en esta fila? En minúsculas las dos partes: quien busca en una
+//  terminal no quiere pelearse con las mayúsculas.
+fn fila_contiene(term: &Terminal, fila: u32, aguja: &str) -> bool {
+    term.dump_screen_row(fila)
+        .is_some_and(|l| l.to_lowercase().contains(aguja))
 }
 
 //  El historial en texto plano, de una fila a otra, ambas dentro. `hasta` en
@@ -722,6 +766,95 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
                         term.scroll_viewport(salto.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
                     sucio = true;
                     desde.get_or_insert_with(Instant::now);
+                }
+            }
+            Ok(Recado::Buscar { texto, hacia }) => {
+                let (arriba, total) = term.viewport_position().unwrap_or((0, 0));
+                let aguja = texto.trim().to_lowercase();
+
+                let mut hallada: Option<u32> = None;
+                if !aguja.is_empty() {
+                    //  Se empieza en la fila de al lado y no en la de ahora:
+                    //  si no, buscar «lo siguiente» te deja clavado en lo que
+                    //  ya tienes delante.
+                    if hacia < 0 {
+                        let mut f = arriba;
+                        while f > 0 {
+                            f -= 1;
+                            if fila_contiene(&term, f, &aguja) {
+                                hallada = Some(f);
+                                break;
+                            }
+                        }
+                    } else {
+                        let mut f = arriba + 1;
+                        while f < total {
+                            if fila_contiene(&term, f, &aguja) {
+                                hallada = Some(f);
+                                break;
+                            }
+                            f += 1;
+                        }
+                    }
+                }
+
+                if let Some(f) = hallada {
+                    let salto = i64::from(f) - i64::from(arriba);
+                    let _ = term.scroll_viewport(salto.clamp(-1_000_000, 1_000_000) as i32);
+                    sucio = true;
+                    desde.get_or_insert_with(Instant::now);
+                }
+
+                decir(&Buscado {
+                    que: "buscado",
+                    hay: hallada.is_some(),
+                    fila: hallada.unwrap_or(arriba),
+                });
+            }
+            Ok(Recado::Nota { entera }) => {
+                //  La puerta a Edinot solo se abre si Edinot está, igual que
+                //  en la ventana: quien no lo tenga no se entera de que
+                //  existe y la tecla no hace nada.
+                let ultimo = bloques.last().copied();
+                let (titulo, cuerpo) = if entera {
+                    (
+                        "Sesión de terminal".to_string(),
+                        texto_de(&term, 0, 0, 0, 0),
+                    )
+                } else {
+                    match ultimo {
+                        Some(b) => (
+                            "Salida de un mandato".to_string(),
+                            texto_de(&term, b.fila, b.fin.saturating_sub(1), 0, 0),
+                        ),
+                        None => (String::new(), String::new()),
+                    }
+                };
+
+                if cuerpo.trim().is_empty() {
+                    decir(&AvisoDicho {
+                        que: "aviso",
+                        texto: "No hay nada que anotar".to_string(),
+                    });
+                } else if !edinot::disponible() {
+                    decir(&AvisoDicho {
+                        que: "aviso",
+                        texto: "No hay Edinot abierto".to_string(),
+                    });
+                } else {
+                    //  En su propio hilo: la primera llamada se engancha a la
+                    //  aplicación viva y puede tardar lo suyo, y el motor no
+                    //  puede quedarse parado mientras tanto — es quien pinta.
+                    thread::spawn(move || match edinot::anotar(&titulo, &cuerpo) {
+                        Ok(nota) => decir(&AvisoDicho {
+                            que: "aviso",
+                            texto: format!("Guardado en {nota}"),
+                        }),
+                        Err(fallo) => decir(&AvisoDicho {
+                            que: "aviso",
+                            texto: fallo,
+                        }),
+                    });
                 }
             }
             Ok(Recado::Marca { empieza, salida }) => {
@@ -1075,6 +1208,12 @@ fn main() {
                 }
                 Orden::Saltar { hacia } => {
                     let _ = tx.send(Recado::Saltar { hacia });
+                }
+                Orden::Buscar { texto, hacia } => {
+                    let _ = tx.send(Recado::Buscar { texto, hacia });
+                }
+                Orden::Nota { entera } => {
+                    let _ = tx.send(Recado::Nota { entera });
                 }
             }
         }
