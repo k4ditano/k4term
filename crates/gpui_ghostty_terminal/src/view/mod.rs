@@ -2705,11 +2705,39 @@ impl Element for TerminalTextElement {
                 if vista.estela_largo > 0 && distancia >= 2.0 {
                     let intensidad = (distancia / 24.0).clamp(0.0, 1.0);
                     let lifetime = Duration::from_secs_f32(0.1 + intensidad * 0.3);
-                    vista.cursor_estela.push(CursorTrailGhost {
-                        position: anterior,
-                        started: Instant::now(),
-                        lifetime,
-                    });
+                    let ahora = Instant::now();
+                    // Sample the movement into a short ribbon. Kitty's
+                    // shader renders this as a continuous trail; a handful
+                    // of fading after-images gives the same visual result in
+                    // GPUI without making the actual cursor lag.
+                    let pasos = distancia
+                        .ceil()
+                        .clamp(1.0, vista.estela_largo as f32)
+                        as usize;
+                    for paso in 0..pasos {
+                        let t = if pasos == 1 {
+                            0.0
+                        } else {
+                            paso as f32 / (pasos - 1) as f32
+                        };
+                        let posicion = point(
+                            anterior.x + (destino.x - anterior.x) * t,
+                            anterior.y + (destino.y - anterior.y) * t,
+                        );
+                        // The oldest part of the ribbon has already started
+                        // fading when the newest part is created.
+                        let edad = (1.0 - t) * 0.35;
+                        let started = ahora
+                            .checked_sub(Duration::from_secs_f32(
+                                lifetime.as_secs_f32() * edad,
+                            ))
+                            .unwrap_or(ahora);
+                        vista.cursor_estela.push(CursorTrailGhost {
+                            position: posicion,
+                            started,
+                            lifetime,
+                        });
+                    }
                     let sobran = vista
                         .cursor_estela
                         .len()
