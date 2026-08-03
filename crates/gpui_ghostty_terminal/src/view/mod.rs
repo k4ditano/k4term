@@ -268,6 +268,18 @@ pub struct TerminalView {
     font_size_base: Option<Pixels>,
     busqueda: Option<Busqueda>,
     servidores: Option<Servidores>,
+    //  Una conexión en marcha: a dónde y desde cuándo. Mientras dura se pinta
+    //  el camino —de aquí, por la llave, hasta allí— porque un `ssh` que tarda
+    //  tres segundos sin decir nada parece una terminal colgada.
+    conectando: Option<(String, Instant)>,
+    //  Lo último que un selector se comió por la vía de las TECLAS, y cuándo.
+    //
+    //  Hace falta porque el texto puede llegar por dos caminos —`on_key_down`
+    //  con su `key_char`, y el método de entrada con `replace_text_in_range`—
+    //  y cuál de los dos aparece no es cosa nuestra: tras recuperar el foco de
+    //  la ventana, a veces solo llega el segundo. Se atienden los dos y se
+    //  descarta el repetido, que es lo único que sobra.
+    ultimo_tecleado: Option<(String, Instant)>,
     //  Hasta cuándo dura el destello de la campana.
     campana_hasta: Option<std::time::Instant>,
     //  Los mandatos que han pasado por aquí, en coordenadas del historial.
@@ -476,6 +488,8 @@ impl TerminalView {
             font_size_base: None,
             busqueda: None,
             servidores: None,
+            conectando: None,
+            ultimo_tecleado: None,
             campana_hasta: None,
             bloques: Vec::new(),
             tranquilo: false,
@@ -535,6 +549,8 @@ impl TerminalView {
             font_size_base: None,
             busqueda: None,
             servidores: None,
+            conectando: None,
+            ultimo_tecleado: None,
             campana_hasta: None,
             bloques: Vec::new(),
             tranquilo: false,
@@ -878,7 +894,7 @@ impl TerminalView {
     //  en su bucle: sin esto, el cursor se quedaría a medio camino hasta que
     //  llegara salida nueva.
     pub fn animando(&self) -> bool {
-        self.cursor_moviendose || !self.cursor_estela.is_empty()
+        self.cursor_moviendose || !self.cursor_estela.is_empty() || self.conectando.is_some()
     }
 
     pub fn campana_encendida(&mut self, cx: &mut Context<Self>) -> bool {
@@ -987,11 +1003,9 @@ impl TerminalView {
         if keystroke.modifiers.control || keystroke.modifiers.alt {
             return;
         }
-        if let Some(texto) = keystroke.key_char.as_ref()
-            && let Some(s) = self.servidores.as_mut()
-        {
-            s.patron.push_str(texto);
-            s.indice = 0;
+        if let Some(texto) = keystroke.key_char.clone() {
+            self.ultimo_tecleado = Some((texto.clone(), Instant::now()));
+            self.texto_al_selector(&texto);
             cx.notify();
         }
     }
@@ -1030,6 +1044,14 @@ impl TerminalView {
         }
 
         self.servidores = None;
+        self.conectando = Some((
+            if elegido.rapido {
+                elegido.host.clone()
+            } else {
+                elegido.alias.clone()
+            },
+            Instant::now(),
+        ));
         self.send_input_parts(&[format!("{mandato}\r").as_bytes()], cx);
         cx.notify();
     }
@@ -1055,6 +1077,26 @@ impl TerminalView {
             s.editando = Some(Formulario::de(&elegido));
         }
         cx.notify();
+    }
+
+    //  Meter texto en el selector que esté abierto, venga por donde venga.
+    //  Devuelve si alguien se lo ha quedado.
+    fn texto_al_selector(&mut self, texto: &str) -> bool {
+        if let Some(f) = self.servidores.as_mut().and_then(|s| s.editando.as_mut()) {
+            let i = f.indice;
+            f.valores[i].push_str(texto);
+            return true;
+        }
+        if let Some(s) = self.servidores.as_mut() {
+            s.patron.push_str(texto);
+            s.indice = 0;
+            return true;
+        }
+        if let Some(b) = self.busqueda.as_mut() {
+            b.patron.push_str(texto);
+            return true;
+        }
+        false
     }
 
     fn tecla_de_formulario(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
@@ -1208,10 +1250,9 @@ impl TerminalView {
         if keystroke.modifiers.control || keystroke.modifiers.alt {
             return;
         }
-        if let Some(texto) = keystroke.key_char.as_ref() {
-            if let Some(b) = self.busqueda.as_mut() {
-                b.patron.push_str(texto);
-            }
+        if let Some(texto) = keystroke.key_char.clone() {
+            self.ultimo_tecleado = Some((texto.clone(), Instant::now()));
+            self.texto_al_selector(&texto);
             cx.notify();
         }
     }
@@ -1675,6 +1716,21 @@ impl TerminalView {
 
     pub fn queue_output_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         const MAX_PENDING_OUTPUT_BYTES: usize = 256 * 1024;
+
+        //  Se conectó (o falló, que también se ve): lo primero que llega del
+        //  otro lado apaga el camino.
+        //
+        //  Es una regla de dedo y conviene decirlo: lo que llega en el primer
+        //  cuarto de segundo es el eco de lo que acabas de teclear, no una
+        //  respuesta. Después de eso, cualquier salida —el prompt de allí o un
+        //  «connection refused»— significa que la espera terminó. Y un tope
+        //  por si no llega nada nunca.
+        if let Some((_, desde)) = self.conectando.as_ref() {
+            let esperado = desde.elapsed();
+            if esperado > Duration::from_millis(250) || esperado > Duration::from_secs(25) {
+                self.conectando = None;
+            }
+        }
 
         if self.pending_output.len().saturating_add(bytes.len()) <= MAX_PENDING_OUTPUT_BYTES {
             self.pending_output.extend_from_slice(bytes);
@@ -2265,12 +2321,25 @@ impl EntityInputHandler for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        //  Con un selector abierto, lo que se teclea es SUYO. El texto normal
-        //  no llega por `on_key_down` sino por aquí —es la vía del método de
-        //  entrada, la que hace que funcionen las teclas muertas y el CJK—,
-        //  así que sin esta guarda el filtro se escribía además en la sesión:
-        //  `trab` + Intro dejaba un precioso `trabssh trabajo` en el prompt.
+        //  Con un selector abierto, lo que se teclea es SUYO y no de la
+        //  sesión: sin esta guarda, `trab` + Intro dejaba un precioso
+        //  `trabssh trabajo` en el prompt.
+        //
+        //  Pero no basta con tirarlo. El texto llega por DOS caminos —las
+        //  teclas y este, que es el del método de entrada, el de las teclas
+        //  muertas y el CJK— y cuál aparece no lo decidimos nosotros: al
+        //  recuperar el foco de la ventana, a veces solo llega este. Tirarlo
+        //  dejaba el selector mudo justo después de volver a la ventana. Así
+        //  que se atiende, descartando lo que acabe de entrar por el otro.
         if self.servidores.is_some() || self.busqueda.is_some() {
+            let repetido = self.ultimo_tecleado.as_ref().is_some_and(|(t, cuando)| {
+                t == text && cuando.elapsed() < Duration::from_millis(50)
+            });
+            if !repetido {
+                self.texto_al_selector(text);
+                cx.notify();
+            }
+            self.ultimo_tecleado = None;
             return;
         }
         self.clear_marked_text(cx);
@@ -3477,6 +3546,125 @@ impl Render for TerminalView {
             //  El selector de servidores, en medio y arriba: es una decisión
             //  —tapa parte de lo que hay debajo— pero elegir a dónde ir es lo
             //  único que estás haciendo mientras está abierto.
+            //  El camino de la conexión: de aquí, por la llave, hasta allí.
+            //  Mientras `ssh` negocia no se ve NADA en la terminal —ni un
+            //  punto— y tres segundos de pantalla quieta parecen una terminal
+            //  colgada; esto dice «voy».
+            .children(self.conectando.as_ref().map(|(destino, desde)| {
+                let t = desde.elapsed().as_secs_f32();
+                //  Un ciclo de segundo y medio: la chispa sale de la izquierda,
+                //  pasa por la llave y llega al otro lado.
+                let paso = (t / 1.5).fract();
+                let ancho = 220.0_f32;
+                let azul = hsla(0.58, 1.0, 0.62, 1.0);
+                let apagado = hsla(0.58, 0.6, 0.62, 0.25);
+
+                //  La llave late al ritmo del viaje, para que se vea que la
+                //  cosa sigue aunque la chispa esté al otro lado.
+                let latido = 0.55 + 0.45 * (t * 3.2).sin().abs();
+
+                //  Centrado con una capa que ocupa todo y centra por dentro:
+                //  colocarlo «al 50 % y luego medio ancho a la izquierda» daba
+                //  con la caja pegada al borde derecho, que es lo que pasa
+                //  cuando ese 50 % no se mide contra lo que uno cree.
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .relative()
+                                    .w(px(ancho))
+                                    .h(px(26.))
+                                    .flex()
+                                    .items_center()
+                                    //  La línea de fondo, y encima la chispa.
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left_0()
+                                            .w(px(ancho))
+                                            .h(px(2.))
+                                            .bg(apagado),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(px(paso * (ancho - 10.0)))
+                                            .w(px(10.))
+                                            .h(px(2.))
+                                            .bg(azul),
+                                    )
+                                    //  Los tres hitos: de dónde sales, la llave y a
+                                    //  dónde vas.
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left_0()
+                                            .w(px(16.))
+                                            .h(px(16.))
+                                            .rounded_full()
+                                            .bg(azul),
+                                    )
+                                    .child(
+                                        //  El ojo de cerradura va DIBUJADO y no con un
+                                        //  glifo: una letra se apoya en su línea base y
+                                        //  en su caja, así que dentro de un círculo
+                                        //  queda descentrada —y con qué fuente resuelva
+                                        //  cada uno, de una forma distinta.
+                                        div()
+                                            .absolute()
+                                            .left(px(ancho / 2.0 - 13.0))
+                                            .w(px(26.))
+                                            .h(px(26.))
+                                            .rounded_full()
+                                            .bg(hsla(0.58, 1.0, 0.62, latido))
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .left(px(9.))
+                                                    .top(px(7.))
+                                                    .w(px(8.))
+                                                    .h(px(8.))
+                                                    .rounded_full()
+                                                    .bg(hsla(0., 0., 0.08, 1.0)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .left(px(11.5))
+                                                    .top(px(13.))
+                                                    .w(px(3.))
+                                                    .h(px(6.))
+                                                    .rounded(px(1.))
+                                                    .bg(hsla(0., 0., 0.08, 1.0)),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(px(ancho - 16.0))
+                                            .w(px(16.))
+                                            .h(px(16.))
+                                            .rounded_full()
+                                            .bg(if paso > 0.9 { azul } else { apagado }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_color(hsla(0., 0., 0.65, 1.0))
+                                    .child(format!("conectando a {destino}…")),
+                            ),
+                    )
+            }))
             //  El selector de servidores, en medio y arriba: tapa parte de lo
             //  que hay debajo, y es a propósito — elegir a dónde ir es lo
             //  único que estás haciendo mientras está abierto.
