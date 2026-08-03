@@ -1313,11 +1313,10 @@ impl TerminalView {
             return;
         };
 
-        if self.session.bracketed_paste_enabled() {
-            self.send_input_parts(&[b"\x1b[200~", text.as_bytes(), b"\x1b[201~"], cx);
-        } else {
-            self.send_input_parts(&[text.as_bytes()], cx);
-        }
+        //  Los corchetes y el salto de línea los pone la misma pieza que en la
+        //  isla, que pegar es de las cosas que no pueden diferir entre las dos.
+        let payload = self.session.paste_payload(&text);
+        self.send_input_parts(&[payload.as_slice()], cx);
     }
 
     fn on_copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1961,10 +1960,7 @@ fn adornos_de_la_casa(
                     let ancho = patron.chars().count();
                     salida.push(fill(
                         Bounds::new(
-                            point(
-                                bounds.left() + px(ancho_celda * col as f32),
-                                y_de(indice),
-                            ),
+                            point(bounds.left() + px(ancho_celda * col as f32), y_de(indice)),
                             size(px(ancho_celda * ancho as f32), line_height),
                         ),
                         if esta_activa {
@@ -1995,9 +1991,9 @@ fn adornos_de_la_casa(
         }
 
         let color = match bloque.salida {
-            None => hsla(0., 0., 0.56, 0.45),          // corriendo
-            Some(0) => hsla(0.38, 0.72, 0.51, 0.85),   // verde de la casa
-            Some(_) => hsla(0.01, 1.0, 0.61, 0.85),    // rojo de la casa
+            None => hsla(0., 0., 0.56, 0.45),        // corriendo
+            Some(0) => hsla(0.38, 0.72, 0.51, 0.85), // verde de la casa
+            Some(_) => hsla(0.01, 1.0, 0.61, 0.85),  // rojo de la casa
         };
 
         salida.push(fill(
@@ -2041,10 +2037,7 @@ fn adornos_de_la_casa(
         let y = bounds.top() + (alto - alto_pulgar) * avance;
 
         salida.push(fill(
-            Bounds::new(
-                point(bounds.right() + px(4.), y),
-                size(px(3.), alto_pulgar),
-            ),
+            Bounds::new(point(bounds.right() + px(4.), y), size(px(3.), alto_pulgar)),
             hsla(0., 0., 1.0, 0.22),
         ));
     }
@@ -2719,10 +2712,7 @@ impl Element for TerminalTextElement {
                     // shader renders this as a continuous trail; a handful
                     // of fading after-images gives the same visual result in
                     // GPUI without making the actual cursor lag.
-                    let pasos = distancia
-                        .ceil()
-                        .clamp(1.0, vista.estela_largo as f32)
-                        as usize;
+                    let pasos = distancia.ceil().clamp(1.0, vista.estela_largo as f32) as usize;
                     for paso in 0..pasos {
                         let t = if pasos == 1 {
                             0.0
@@ -2737,9 +2727,7 @@ impl Element for TerminalTextElement {
                         // fading when the newest part is created.
                         let edad = (1.0 - t) * 0.35;
                         let started = ahora
-                            .checked_sub(Duration::from_secs_f32(
-                                lifetime.as_secs_f32() * edad,
-                            ))
+                            .checked_sub(Duration::from_secs_f32(lifetime.as_secs_f32() * edad))
                             .unwrap_or(ahora);
                         vista.cursor_estela.push(CursorTrailGhost {
                             position: posicion,
@@ -2842,7 +2830,9 @@ impl Element for TerminalTextElement {
             // que es el hueco que dejaba observar solo los cambios de ventana.
             if let Some((cell_width, cell_height)) = metrics {
                 let cols = (f32::from(bounds.size.width) / cell_width).floor().max(2.0) as u16;
-                let rows = (f32::from(bounds.size.height) / cell_height).floor().max(2.0) as u16;
+                let rows = (f32::from(bounds.size.height) / cell_height)
+                    .floor()
+                    .max(2.0) as u16;
                 if cols != view.session.cols() || rows != view.session.rows() {
                     view.resize_terminal(cols, rows, cx);
                     if let Some(cb) = view.on_resize.clone() {
@@ -3036,12 +3026,7 @@ impl Render for TerminalView {
             .children(
                 self.campana_hasta
                     .filter(|hasta| std::time::Instant::now() < *hasta)
-                    .map(|_| {
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .bg(gpui::rgba(0xffffff20))
-                    }),
+                    .map(|_| div().absolute().inset_0().bg(gpui::rgba(0xffffff20))),
             )
             //  La barra de búsqueda va por encima y no dentro del flujo: así
             //  no le quita filas a la rejilla ni la obliga a rehacerse cada
@@ -3071,11 +3056,7 @@ impl Render for TerminalView {
                     .bg(hsla(0., 0., 0.11, 0.96))
                     .border_1()
                     .border_color(hsla(0., 0., 1.0, 0.08))
-                    .child(
-                        div()
-                            .text_color(hsla(0., 0., 0.56, 1.0))
-                            .child("buscar"),
-                    )
+                    .child(div().text_color(hsla(0., 0., 0.56, 1.0)).child("buscar"))
                     .child(div().text_color(gpui::white()).child(b.patron.clone()))
                     .child(
                         div()

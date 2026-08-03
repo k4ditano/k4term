@@ -25,11 +25,19 @@
 //      {"que":"tecla","nombre":"enter"}          tecla con nombre (+ mods)
 //      {"que":"medida","cols":90,"filas":16}     redimensiona
 //      {"que":"pinta"}                           manda un marco entero ya
+//      {"que":"pegar","valor":"…"}               pega (con corchetes si toca)
+//      {"que":"raton","tipo":"pulsar","boton":"izquierdo","col":1,"fila":1}
+//      {"que":"rueda","lineas":-3,"col":1,"fila":1}
+//      {"que":"texto_de","desde":10,"hasta":0}   historial en texto plano
+//      {"que":"saltar","hacia":-1}               al prompt anterior
 //
 //  Y lo que responde:
 //
 //      {"que":"marco","filas":[[{"t":"…","f":"#rrggbb","b":"#rrggbb","n":0}]],
-//       "cursor":[col,fila],"cols":90,"filas_n":16,"scroll":[arriba,total]}
+//       "cursor":[col,fila],"cols":90,"filas_n":16,"scroll":[arriba,total],
+//       "raton":false,"bloques":[{"fila":120,"estado":"bien","fin":126}]}
+//      {"que":"portapapeles","texto":"…"}        lo copió la aplicación
+//      {"que":"texto","texto":"…"}               lo pedido con `texto_de`
 
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
@@ -37,7 +45,9 @@ use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ghostty_vt::{KeyModifiers, Rgb, Terminal, encode_key_named};
+use ghostty_vt::{
+    Boton, KeyModifiers, ModeTracker, Rgb, SucesoRaton, Terminal, encode_key_named, encode_mouse,
+};
 use k4term_puente::{Aviso, Suceso, osc::Escaner, tema, trabajos};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
@@ -75,16 +85,113 @@ enum Orden {
     #[serde(rename = "donde")]
     Donde,
     #[serde(rename = "rueda")]
-    Rueda { lineas: i32 },
+    Rueda {
+        lineas: i32,
+        //  Dónde estaba el puntero. Solo hace falta cuando la aplicación
+        //  quiere el ratón: entonces la rueda es suya y no del historial.
+        #[serde(default)]
+        col: u16,
+        #[serde(default)]
+        fila: u16,
+        //  «Esto es MÍO»: mover el historial aunque la aplicación tenga el
+        //  ratón puesto. Es lo que pasa con shift, la salida de emergencia de
+        //  toda la vida para mirar hacia atrás dentro de un programa.
+        #[serde(default)]
+        historial: bool,
+    },
+    //  Al principio o al final del historial de una vez.
+    #[serde(rename = "tope")]
+    Tope { arriba: bool },
+    //  Pegar es distinto de escribir: puede llevar corchetes alrededor si la
+    //  aplicación los pidió, y eso solo lo sabe quien mira el chorro.
+    #[serde(rename = "pegar")]
+    Pegar { valor: String },
+    #[serde(rename = "raton")]
+    Raton {
+        tipo: String,
+        #[serde(default)]
+        boton: String,
+        col: u16,
+        fila: u16,
+        #[serde(default)]
+        shift: bool,
+        #[serde(default)]
+        control: bool,
+        #[serde(default)]
+        alt: bool,
+    },
+    //  Qué hay escrito de tal fila a tal fila del historial, para copiar.
+    //
+    //  Las columnas recortan la primera y la última línea —que es lo que
+    //  distingue una selección de arrastre de «estas filas enteras»—, y el
+    //  motivo vuelve con la respuesta: la barra pide texto para copiar, para
+    //  una nota o para el portapapeles, y la contestación tiene que decir
+    //  cuál de las tres era.
+    #[serde(rename = "texto_de")]
+    TextoDe {
+        desde: u32,
+        hasta: u32,
+        #[serde(default)]
+        col_desde: u16,
+        #[serde(default)]
+        col_hasta: u16,
+        #[serde(default)]
+        motivo: String,
+    },
+    //  Al prompt anterior (-1) o al siguiente (1).
+    #[serde(rename = "saltar")]
+    Saltar { hacia: i32 },
 }
 
 enum Recado {
     Bytes(Vec<u8>),
-    Medida { cols: u16, filas: u16 },
+    Medida {
+        cols: u16,
+        filas: u16,
+    },
     Pinta,
     Donde,
-    Rueda { lineas: i32 },
+    Rueda {
+        lineas: i32,
+        col: u16,
+        fila: u16,
+        historial: bool,
+    },
+    Tope {
+        arriba: bool,
+    },
+    Pegar(String),
+    Raton(Clic),
+    TextoDe {
+        desde: u32,
+        hasta: u32,
+        col_desde: u16,
+        col_hasta: u16,
+        motivo: String,
+    },
+    //  Al prompt anterior o al siguiente. Lo resuelve el motor porque es el
+    //  único que tiene las marcas y el historial en las mismas coordenadas.
+    Saltar {
+        hacia: i32,
+    },
+    //  Un mandato empieza o termina, visto en el chorro. Llega por el mismo
+    //  canal que los bytes y DESPUÉS que ellos, así que el cursor ya está
+    //  donde toca cuando se apunta la marca.
+    Marca {
+        empieza: bool,
+        salida: i32,
+    },
     Ajustes(Box<k4term_puente::Ajustes>),
+}
+
+//  Un clic ya traducido: la barra habla de «izquierdo» y «pulsar», el
+//  terminal de números y letras.
+struct Clic {
+    suceso: SucesoRaton,
+    boton: Boton,
+    col: u16,
+    fila: u16,
+    mods: KeyModifiers,
 }
 
 //  Lo que se está cociendo aquí dentro, y quién te llama.
@@ -115,6 +222,25 @@ struct Campana {
 struct Donde {
     que: &'static str,
     ruta: String,
+}
+
+//  Lo que la aplicación de dentro ha pedido copiar (OSC 52). Aquí no hay
+//  portapapeles —esto no es una ventana—, así que se le pasa a la barra, que
+//  sí lo tiene y además lleva el historial de copias de la casa.
+#[derive(Serialize)]
+struct Portapapeles {
+    que: &'static str,
+    texto: String,
+}
+
+//  Un trozo del historial en texto plano, que es lo que se copia y lo que se
+//  manda a una nota. Se pide por filas del historial y no del hueco visible:
+//  lo que se ve cambia de sitio en cuanto sigue saliendo salida.
+#[derive(Serialize)]
+struct Texto {
+    que: &'static str,
+    texto: String,
+    motivo: String,
 }
 
 //  Lo que la vista necesita saber de los ajustes de k4term. Se le manda desde
@@ -185,6 +311,29 @@ struct Marco {
     //  historial vive aquí, no en la barra—, así que sin estos dos números la
     //  vista no tiene con qué dibujar la barrita de la casa.
     scroll: [u32; 2],
+    //  Si la aplicación de dentro quiere el ratón. Con esto puesto, arrastrar
+    //  es SUYO —htop cambiando de columna, vim seleccionando— y la vista no
+    //  puede quedarse el arrastre para hacer su propia selección; sin ello, al
+    //  revés. Que lo diga el marco evita que la barra tenga que adivinarlo.
+    raton: bool,
+    //  Los bloques que se ven ahora mismo: por qué fila del historial empieza
+    //  cada mandato y cómo acabó. Es lo que pinta el filete del margen y lo
+    //  que permite saltar de un prompt al siguiente.
+    bloques: Vec<Bloque>,
+    //  Y el último, se vea o no. Copiar la salida del mandato anterior tiene
+    //  que funcionar también cuando el prompt ya se ha ido por arriba, que es
+    //  justo cuando hace falta.
+    ultimo: Option<Bloque>,
+}
+
+//  Un mandato, en coordenadas del historial. El estado es el del filete:
+//  «corre» mientras no ha terminado, «bien» o «mal» según el código de salida.
+#[derive(Serialize, Clone, Copy)]
+struct Bloque {
+    fila: u32,
+    estado: &'static str,
+    //  Dónde terminó. Mientras corre no se sabe, y vale la fila de arranque.
+    fin: u32,
 }
 
 fn hex(c: Rgb) -> String {
@@ -235,7 +384,82 @@ fn fila_en_tramos(term: &Terminal, fila: u16, fondo: &str) -> Vec<Tramo> {
 //  volcado empiezan en 0, y el cursor viene en 1. Volcar desde 1 se comía la
 //  primera fila y dejaba el cursor pintado una línea por debajo de donde de
 //  verdad escribes.
-fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str, cwd: String) -> Marco {
+//  Por qué fila del historial va el cursor. Es la coordenada en la que se
+//  apuntan las marcas de los mandatos: la única que sobrevive a que la salida
+//  siga subiendo y lo visible se desplace debajo.
+fn fila_absoluta(term: &Terminal) -> u32 {
+    let (arriba, _) = term.viewport_position().unwrap_or((0, 0));
+    let (_, fila) = term.cursor_position().unwrap_or((1, 1));
+    arriba + u32::from(fila.saturating_sub(1))
+}
+
+//  El historial en texto plano, de una fila a otra, ambas dentro. `hasta` en
+//  cero significa «hasta donde llegue»: quien copia una sesión entera no tiene
+//  por qué saber cuántas filas hay.
+fn texto_de(term: &Terminal, desde: u32, hasta: u32, col_desde: u16, col_hasta: u16) -> String {
+    let (_, total) = term.viewport_position().unwrap_or((0, 0));
+    let fin = if hasta == 0 { total } else { hasta.min(total) };
+
+    let mut lineas: Vec<String> = Vec::new();
+    let mut fila = desde;
+    while fila <= fin {
+        match term.dump_screen_row(fila) {
+            Some(l) => lineas.push(l.trim_end().to_string()),
+            None => break,
+        }
+        fila += 1;
+    }
+
+    //  Las líneas en blanco del final son el hueco que quedaba por debajo, no
+    //  parte de lo que se copia.
+    while lineas.last().is_some_and(|l| l.is_empty()) {
+        lineas.pop();
+    }
+
+    //  El recorte por columnas es lo que hace que una selección de arrastre
+    //  sea lo que se ve y no las filas enteras. Se corta por CARACTERES y no
+    //  por bytes: una tilde ocupa dos bytes y una sola columna.
+    //
+    //  Y con una sola línea hay que cortar por los dos lados A LA VEZ: hacerlo
+    //  como en el caso de varias —quitar por delante en la primera, recortar
+    //  por detrás en la última— se lleva por delante el trozo bueno, porque
+    //  aquí la primera y la última son la misma.
+    let ini = usize::from(col_desde.saturating_sub(1));
+    let fin = if col_hasta == 0 {
+        usize::MAX
+    } else {
+        usize::from(col_hasta)
+    };
+
+    if lineas.len() == 1 {
+        if let Some(unica) = lineas.first_mut() {
+            *unica = unica.chars().take(fin).skip(ini).collect::<String>();
+        }
+    } else {
+        if let Some(primera) = lineas.first_mut()
+            && ini > 0
+        {
+            *primera = primera.chars().skip(ini).collect::<String>();
+        }
+        if let Some(ultima) = lineas.last_mut()
+            && col_hasta > 0
+        {
+            *ultima = ultima.chars().take(fin).collect::<String>();
+        }
+    }
+
+    lineas.join("\n")
+}
+
+fn marco(
+    term: &Terminal,
+    cols: u16,
+    filas: u16,
+    fondo: &str,
+    cwd: String,
+    raton: bool,
+    bloques: &[Bloque],
+) -> Marco {
     let titulo = term.title().unwrap_or_default();
     let mut salida = Vec::with_capacity(filas as usize);
     for f in 0..filas {
@@ -255,6 +479,16 @@ fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str, cwd: String) -> Ma
     //  lo que se ve deja la barrita entera, que es como no tenerla.
     let (arriba, total) = term.viewport_position().unwrap_or((0, u32::from(filas)));
 
+    //  Solo los bloques que caen en lo que se ve: el filete se pinta por fila
+    //  de la rejilla, y mandar los quinientos de la sesión entera para pintar
+    //  tres sería tirar trabajo en cada marco.
+    let abajo = arriba + u32::from(filas);
+    let vistos: Vec<Bloque> = bloques
+        .iter()
+        .filter(|b| b.fila >= arriba && b.fila < abajo)
+        .copied()
+        .collect();
+
     Marco {
         que: "marco",
         filas: salida,
@@ -265,6 +499,9 @@ fn marco(term: &Terminal, cols: u16, filas: u16, fondo: &str, cwd: String) -> Ma
         cwd,
         titulo,
         scroll: [arriba, total.max(u32::from(filas))],
+        raton,
+        bloques: vistos,
+        ultimo: bloques.last().copied(),
     }
 }
 
@@ -327,6 +564,16 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
     let mut desde: Option<Instant> = None;
     let salida = std::io::stdout();
 
+    //  Lo que la aplicación pide sin decirlo: corchetes al pegar, ratón,
+    //  portapapeles. La misma pieza que usa la ventana.
+    let mut modos = ModeTracker::new();
+
+    //  Los mandatos vistos, en coordenadas del historial. Se podan por arriba
+    //  porque una sesión de un día entero acumularía miles y solo se usan los
+    //  de cerca: los que se ven y el último.
+    let mut bloques: Vec<Bloque> = Vec::new();
+    const TOPE_BLOQUES: usize = 400;
+
     //  Los ajustes van por delante del primer marco: si llegaran después, la
     //  vista pintaría el primer cursor con la estela de fábrica y la
     //  corregiría a la vista del usuario.
@@ -345,6 +592,15 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
 
         match recado {
             Ok(Recado::Bytes(b)) => {
+                //  Los modos se miran ANTES de que el VT se coma los bytes:
+                //  los dos leen lo mismo, cada uno a lo suyo.
+                modos.feed(&b);
+                if let Some(texto) = modos.take_clipboard_write() {
+                    decir(&Portapapeles {
+                        que: "portapapeles",
+                        texto,
+                    });
+                }
                 let _ = term.feed(&b);
                 //  Y lo que haya que contestar, de vuelta por el PTY. Va
                 //  pegado al feed porque quien pregunta está esperando: un
@@ -370,8 +626,118 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
                 sucio = true;
                 desde.get_or_insert_with(Instant::now);
             }
-            Ok(Recado::Rueda { lineas }) => {
-                let _ = term.scroll_viewport(lineas);
+            Ok(Recado::Tope { arriba }) => {
+                let _ = if arriba {
+                    term.scroll_viewport_top()
+                } else {
+                    term.scroll_viewport_bottom()
+                };
+                sucio = true;
+                desde.get_or_insert_with(Instant::now);
+            }
+            Ok(Recado::Rueda {
+                lineas,
+                col,
+                fila,
+                historial,
+            }) => {
+                //  Con el ratón puesto, la rueda es de la aplicación: en htop
+                //  o en less mover el historial del VT no haría nada visible y
+                //  el programa se quedaría sin enterarse de nada.
+                if modos.mouse_reporting_enabled() && !historial {
+                    let boton = if lineas < 0 {
+                        Boton::RuedaArriba
+                    } else {
+                        Boton::RuedaAbajo
+                    };
+                    for _ in 0..lineas.unsigned_abs().min(10) {
+                        if let Some(bytes) = encode_mouse(
+                            SucesoRaton::Pulsar,
+                            boton,
+                            col.max(1),
+                            fila.max(1),
+                            KeyModifiers::default(),
+                            modos.mouse_sgr_enabled(),
+                        ) {
+                            let _ = al_pty.send(bytes);
+                        }
+                    }
+                } else {
+                    let _ = term.scroll_viewport(lineas);
+                }
+                sucio = true;
+                desde.get_or_insert_with(Instant::now);
+            }
+            Ok(Recado::Pegar(texto)) => {
+                let _ = al_pty.send(modos.paste_payload(&texto));
+            }
+            Ok(Recado::Raton(clic)) => {
+                //  Sin modo de ratón no se manda nada: el arrastre es de la
+                //  vista, que lo usa para seleccionar. Y moverse sin arrastrar
+                //  solo lo quiere quien pidió 1003; con 1002 se cuentan los
+                //  arrastres, no el paseo.
+                let paseo = clic.suceso == SucesoRaton::Mover;
+                let interesa =
+                    modos.mouse_reporting_enabled() && (!paseo || modos.mouse_any_event_enabled());
+                if interesa
+                    && let Some(bytes) = encode_mouse(
+                        clic.suceso,
+                        clic.boton,
+                        clic.col,
+                        clic.fila,
+                        clic.mods,
+                        modos.mouse_sgr_enabled(),
+                    )
+                {
+                    let _ = al_pty.send(bytes);
+                }
+            }
+            Ok(Recado::TextoDe {
+                desde: d,
+                hasta,
+                col_desde,
+                col_hasta,
+                motivo,
+            }) => {
+                decir(&Texto {
+                    que: "texto",
+                    texto: texto_de(&term, d, hasta, col_desde, col_hasta),
+                    motivo,
+                });
+            }
+            Ok(Recado::Saltar { hacia }) => {
+                let (arriba, _) = term.viewport_position().unwrap_or((0, 0));
+                let destino = if hacia < 0 {
+                    bloques
+                        .iter()
+                        .rev()
+                        .find(|b| b.fila < arriba)
+                        .map(|b| b.fila)
+                } else {
+                    bloques.iter().find(|b| b.fila > arriba).map(|b| b.fila)
+                };
+                if let Some(fila) = destino {
+                    let salto = i64::from(fila) - i64::from(arriba);
+                    let _ =
+                        term.scroll_viewport(salto.clamp(i32::MIN as i64, i32::MAX as i64) as i32);
+                    sucio = true;
+                    desde.get_or_insert_with(Instant::now);
+                }
+            }
+            Ok(Recado::Marca { empieza, salida }) => {
+                if empieza {
+                    bloques.push(Bloque {
+                        fila: fila_absoluta(&term),
+                        estado: "corre",
+                        fin: 0,
+                    });
+                    if bloques.len() > TOPE_BLOQUES {
+                        bloques.remove(0);
+                    }
+                } else if let Some(ultimo) = bloques.last_mut() {
+                    ultimo.estado = if salida == 0 { "bien" } else { "mal" };
+                    ultimo.fin = fila_absoluta(&term);
+                }
                 sucio = true;
                 desde.get_or_insert_with(Instant::now);
             }
@@ -395,9 +761,15 @@ fn motor(rx: std::sync::mpsc::Receiver<Recado>, pid_shell: u32, al_pty: Sender<V
             if let Some(d) = directorio(pid_shell) {
                 ultimo_cwd = d;
             }
-            if let Ok(json) =
-                serde_json::to_string(&marco(&term, cols, filas, &fondo, ultimo_cwd.clone()))
-            {
+            if let Ok(json) = serde_json::to_string(&marco(
+                &term,
+                cols,
+                filas,
+                &fondo,
+                ultimo_cwd.clone(),
+                modos.mouse_reporting_enabled(),
+                &bloques,
+            )) {
                 let mut s = salida.lock();
                 if writeln!(s, "{}", json).is_err() || s.flush().is_err() {
                     break;
@@ -476,8 +848,7 @@ fn main() {
         thread::spawn(move || {
             let rx_ajustes = k4term_puente::ajustes::vigilar();
             while let Ok(ajustes) = rx_ajustes.recv() {
-                if tx.send(Recado::Ajustes(Box::new(ajustes))).is_err()
-                {
+                if tx.send(Recado::Ajustes(Box::new(ajustes))).is_err() {
                     break;
                 }
             }
@@ -522,15 +893,44 @@ fn main() {
                     Ok(n) => n,
                 };
 
-                for suceso in escaner.tragar(&buf[..n]) {
+                //  El trozo se parte por donde iba cada marca y se manda a
+                //  cachos, con la marca en medio. Mandarlo entero y apuntar
+                //  después sitúa el mandato donde acabó la ráfaga: con un
+                //  `seq 1 40`, que sale de una tacada, la marca caía tres
+                //  líneas por debajo de donde de verdad empezó.
+                let sucesos = escaner.tragar_con_sitio(&buf[..n]);
+                let mut cortado = 0usize;
+                let mut roto = false;
+
+                for (sitio, suceso) in sucesos {
+                    let marca = matches!(suceso, Suceso::Comienza | Suceso::Termina { .. });
+                    if marca && sitio > cortado {
+                        if tx
+                            .send(Recado::Bytes(buf[cortado..sitio].to_vec()))
+                            .is_err()
+                        {
+                            roto = true;
+                            break;
+                        }
+                        cortado = sitio;
+                    }
+
                     match suceso {
                         Suceso::Mandato(m) => mandato = m,
                         Suceso::Comienza => {
+                            let _ = tx.send(Recado::Marca {
+                                empieza: true,
+                                salida: 0,
+                            });
                             let _ = avisos.send(Aviso::Empieza {
                                 mandato: std::mem::take(&mut mandato),
                             });
                         }
                         Suceso::Termina { salida } => {
+                            let _ = tx.send(Recado::Marca {
+                                empieza: false,
+                                salida,
+                            });
                             let _ = avisos.send(Aviso::Acaba { salida });
                         }
                         Suceso::Campana => decir(&Campana {
@@ -541,7 +941,13 @@ fn main() {
                     }
                 }
 
-                if tx.send(Recado::Bytes(buf[..n].to_vec())).is_err() {
+                if roto {
+                    break;
+                }
+
+                //  Y lo que venga detrás de la última marca. Sin marcas, esto
+                //  es el trozo entero y todo sigue como siempre.
+                if cortado < n && tx.send(Recado::Bytes(buf[cortado..n].to_vec())).is_err() {
                     break;
                 }
             }
@@ -598,8 +1004,77 @@ fn main() {
                 Orden::Donde => {
                     let _ = tx.send(Recado::Donde);
                 }
-                Orden::Rueda { lineas } => {
-                    let _ = tx.send(Recado::Rueda { lineas });
+                Orden::Rueda {
+                    lineas,
+                    col,
+                    fila,
+                    historial,
+                } => {
+                    let _ = tx.send(Recado::Rueda {
+                        lineas,
+                        col,
+                        fila,
+                        historial,
+                    });
+                }
+                Orden::Tope { arriba } => {
+                    let _ = tx.send(Recado::Tope { arriba });
+                }
+                Orden::Pegar { valor } => {
+                    let _ = tx.send(Recado::Pegar(valor));
+                }
+                Orden::Raton {
+                    tipo,
+                    boton,
+                    col,
+                    fila,
+                    shift,
+                    control,
+                    alt,
+                } => {
+                    let suceso = match tipo.as_str() {
+                        "pulsar" => SucesoRaton::Pulsar,
+                        "soltar" => SucesoRaton::Soltar,
+                        "mover" => SucesoRaton::Mover,
+                        _ => continue,
+                    };
+                    let boton = match boton.as_str() {
+                        "medio" => Boton::Medio,
+                        "derecho" => Boton::Derecho,
+                        "arriba" => Boton::RuedaArriba,
+                        "abajo" => Boton::RuedaAbajo,
+                        _ => Boton::Izquierdo,
+                    };
+                    let _ = tx.send(Recado::Raton(Clic {
+                        suceso,
+                        boton,
+                        col: col.max(1),
+                        fila: fila.max(1),
+                        mods: KeyModifiers {
+                            shift,
+                            control,
+                            alt,
+                            super_key: false,
+                        },
+                    }));
+                }
+                Orden::TextoDe {
+                    desde,
+                    hasta,
+                    col_desde,
+                    col_hasta,
+                    motivo,
+                } => {
+                    let _ = tx.send(Recado::TextoDe {
+                        desde,
+                        hasta,
+                        col_desde,
+                        col_hasta,
+                        motivo,
+                    });
+                }
+                Orden::Saltar { hacia } => {
+                    let _ = tx.send(Recado::Saltar { hacia });
                 }
             }
         }

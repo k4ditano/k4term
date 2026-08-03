@@ -48,12 +48,7 @@ fn llamar(argumentos: &[&str]) {
 //  cruza el umbral), y sin este dato su reloj arrancaría en cero y contaría
 //  menos de lo que el mandato lleva de verdad.
 pub fn avisar_inicio(pid: u32, mandato: &str, segundos: u64) {
-    llamar(&[
-        "inicio",
-        &pid.to_string(),
-        mandato,
-        &segundos.to_string(),
-    ]);
+    llamar(&["inicio", &pid.to_string(), mandato, &segundos.to_string()]);
 }
 
 pub fn avisar_fin(pid: u32, mandato: &str, salida: i32, segundos: u64) {

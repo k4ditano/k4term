@@ -2,6 +2,14 @@ use std::ffi::c_void;
 use std::fmt;
 use std::ptr::NonNull;
 
+//  Lo que se lee del chorro y el VT no cuenta: modos privados, título y
+//  portapapeles. Lo usan las dos terminales, la de ventana y la de la isla.
+pub mod modes;
+pub mod raton;
+
+pub use modes::ModeTracker;
+pub use raton::{Boton, Suceso as SucesoRaton, encode_mouse};
+
 #[derive(Debug)]
 pub enum Error {
     CreateFailed,

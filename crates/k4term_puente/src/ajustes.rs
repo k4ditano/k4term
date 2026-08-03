@@ -100,7 +100,9 @@ pub fn vigilar() -> std::sync::mpsc::Receiver<Ajustes> {
             let Ok(suceso) = suceso else { continue };
             if !matches!(
                 suceso.kind,
-                notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Any
+                notify::EventKind::Create(_)
+                    | notify::EventKind::Modify(_)
+                    | notify::EventKind::Any
             ) {
                 continue;
             }
@@ -178,7 +180,8 @@ impl Ajustes {
                     }
                 }
                 "tranquilo" | "quiet" => {
-                    self.tranquilo = matches!(valor.to_lowercase().as_str(), "si" | "sí" | "true" | "1")
+                    self.tranquilo =
+                        matches!(valor.to_lowercase().as_str(), "si" | "sí" | "true" | "1")
                 }
                 _ => {}
             }

@@ -1,18 +1,14 @@
-use ghostty_vt::{Error, Rgb, Terminal};
+use ghostty_vt::{Error, ModeTracker, Rgb, Terminal};
 
 use crate::TerminalConfig;
 
 pub struct TerminalSession {
     config: TerminalConfig,
     terminal: Terminal,
-    bracketed_paste_enabled: bool,
-    mouse_x10_enabled: bool,
-    mouse_button_event_enabled: bool,
-    mouse_any_event_enabled: bool,
-    mouse_sgr_enabled: bool,
-    title: Option<String>,
-    clipboard_write: Option<String>,
-    parse_tail: Vec<u8>,
+    //  Los modos, el título y el portapapeles se leen del chorro con la misma
+    //  pieza que usa la terminal de la isla: si esto fueran dos copias, el
+    //  mismo programa se portaría distinto en cada una.
+    modes: ModeTracker,
     dsr_state: DsrScanState,
     osc_query_state: OscQueryScanState,
 }
@@ -24,14 +20,7 @@ impl TerminalSession {
         Ok(Self {
             config,
             terminal,
-            bracketed_paste_enabled: false,
-            mouse_x10_enabled: false,
-            mouse_button_event_enabled: false,
-            mouse_any_event_enabled: false,
-            mouse_sgr_enabled: false,
-            title: None,
-            clipboard_write: None,
-            parse_tail: Vec::new(),
+            modes: ModeTracker::new(),
             dsr_state: DsrScanState::default(),
             osc_query_state: OscQueryScanState::default(),
         })
@@ -62,27 +51,33 @@ impl TerminalSession {
     }
 
     pub fn bracketed_paste_enabled(&self) -> bool {
-        self.bracketed_paste_enabled
+        self.modes.bracketed_paste_enabled()
+    }
+
+    //  Lo que hay que escribirle al PTY para pegar un texto, con los corchetes
+    //  puestos si la aplicación los pidió.
+    pub fn paste_payload(&self, text: &str) -> Vec<u8> {
+        self.modes.paste_payload(text)
     }
 
     pub fn mouse_reporting_enabled(&self) -> bool {
-        self.mouse_x10_enabled || self.mouse_button_event_enabled || self.mouse_any_event_enabled
+        self.modes.mouse_reporting_enabled()
     }
 
     pub fn mouse_sgr_enabled(&self) -> bool {
-        self.mouse_sgr_enabled
+        self.modes.mouse_sgr_enabled()
     }
 
     pub fn mouse_button_event_enabled(&self) -> bool {
-        self.mouse_button_event_enabled
+        self.modes.mouse_button_event_enabled()
     }
 
     pub fn mouse_any_event_enabled(&self) -> bool {
-        self.mouse_any_event_enabled
+        self.modes.mouse_any_event_enabled()
     }
 
     pub fn title(&self) -> Option<&str> {
-        self.title.as_deref()
+        self.modes.title()
     }
 
     pub(crate) fn window_title_updates_enabled(&self) -> bool {
@@ -94,160 +89,11 @@ impl TerminalSession {
     }
 
     pub fn take_clipboard_write(&mut self) -> Option<String> {
-        self.clipboard_write.take()
-    }
-
-    fn update_state_from_output(&mut self, bytes: &[u8]) {
-        const TAIL_LIMIT: usize = 2048;
-
-        self.parse_tail.extend_from_slice(bytes);
-        if self.parse_tail.len() > TAIL_LIMIT {
-            let drop_len = self.parse_tail.len() - TAIL_LIMIT;
-            self.parse_tail.drain(0..drop_len);
-        }
-        let buf = self.parse_tail.as_slice();
-
-        let mut i = 0usize;
-        while i + 2 < buf.len() {
-            if buf[i] != 0x1b || buf[i + 1] != b'[' || buf[i + 2] != b'?' {
-                i += 1;
-                continue;
-            }
-
-            let mut k = i + 3;
-            let mut nums: Vec<u32> = Vec::new();
-            let mut num: u32 = 0;
-            let mut saw_digit = false;
-            let mut consumed = false;
-
-            while k < buf.len() {
-                let b = buf[k];
-                if b.is_ascii_digit() {
-                    saw_digit = true;
-                    num = num.saturating_mul(10).saturating_add((b - b'0') as u32);
-                    k += 1;
-                    continue;
-                }
-
-                if b == b';' {
-                    if saw_digit {
-                        nums.push(num);
-                        num = 0;
-                        saw_digit = false;
-                    }
-                    k += 1;
-                    continue;
-                }
-
-                if b == b'h' || b == b'l' {
-                    if saw_digit {
-                        nums.push(num);
-                    }
-
-                    let enabled = b == b'h';
-                    for ps in nums {
-                        match ps {
-                            2004 => self.bracketed_paste_enabled = enabled,
-                            1000 => self.mouse_x10_enabled = enabled,
-                            1002 => self.mouse_button_event_enabled = enabled,
-                            1003 => self.mouse_any_event_enabled = enabled,
-                            1006 => self.mouse_sgr_enabled = enabled,
-                            _ => {}
-                        }
-                    }
-
-                    i = k + 1;
-                    consumed = true;
-                    break;
-                }
-
-                i += 1;
-                consumed = true;
-                break;
-            }
-
-            if k >= buf.len() && !consumed {
-                break;
-            }
-
-            if consumed {
-                continue;
-            }
-
-            i += 1;
-        }
-
-        let mut last_title: Option<String> = None;
-        let mut last_clipboard: Option<String> = None;
-        let mut j = 0usize;
-        while j + 1 < buf.len() {
-            if buf[j] != 0x1b || buf[j + 1] != b']' {
-                j += 1;
-                continue;
-            }
-
-            let mut k = j + 2;
-            let mut ps: u32 = 0;
-            let mut saw_digit = false;
-            while k < buf.len() {
-                let b = buf[k];
-                if b.is_ascii_digit() {
-                    saw_digit = true;
-                    ps = ps.saturating_mul(10).saturating_add((b - b'0') as u32);
-                    k += 1;
-                    continue;
-                }
-                if b == b';' {
-                    k += 1;
-                    break;
-                }
-                break;
-            }
-            if !saw_digit || k >= buf.len() {
-                j += 1;
-                continue;
-            }
-
-            let title_start = k;
-            while k < buf.len() {
-                match buf[k] {
-                    0x07 => {
-                        if ps == 0 || ps == 2 {
-                            last_title =
-                                Some(String::from_utf8_lossy(&buf[title_start..k]).into_owned());
-                        } else if ps == 52 {
-                            last_clipboard = decode_osc_52(&buf[title_start..k]);
-                        }
-                        k += 1;
-                        break;
-                    }
-                    0x1b if k + 1 < buf.len() && buf[k + 1] == b'\\' => {
-                        if ps == 0 || ps == 2 {
-                            last_title =
-                                Some(String::from_utf8_lossy(&buf[title_start..k]).into_owned());
-                        } else if ps == 52 {
-                            last_clipboard = decode_osc_52(&buf[title_start..k]);
-                        }
-                        k += 2;
-                        break;
-                    }
-                    _ => k += 1,
-                }
-            }
-
-            j = k.max(j + 1);
-        }
-
-        if let Some(title) = last_title {
-            self.title = Some(title);
-        }
-        if let Some(clipboard) = last_clipboard {
-            self.clipboard_write = Some(clipboard);
-        }
+        self.modes.take_clipboard_write()
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        self.update_state_from_output(bytes);
+        self.modes.feed(bytes);
         self.terminal.feed(bytes)
     }
 
@@ -256,7 +102,7 @@ impl TerminalSession {
         bytes: &[u8],
         mut send: impl FnMut(&[u8]),
     ) -> Result<(), Error> {
-        self.update_state_from_output(bytes);
+        self.modes.feed(bytes);
 
         let mut seg_start = 0usize;
         for (i, &b) in bytes.iter().enumerate() {
@@ -507,23 +353,4 @@ fn value_to_after_semicolon_state(ps: u32) -> OscQueryScanState {
         10 | 11 => OscQueryScanState::AfterSemicolon { ps },
         _ => OscQueryScanState::Idle,
     }
-}
-
-fn decode_osc_52(payload: &[u8]) -> Option<String> {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-
-    let mut split = payload.splitn(2, |b| *b == b';');
-    let selection = split.next()?;
-    let data = split.next()?;
-
-    if !selection.contains(&b'c') {
-        return None;
-    }
-    if data.is_empty() {
-        return None;
-    }
-
-    let decoded = STANDARD.decode(data).ok()?;
-    Some(String::from_utf8_lossy(&decoded).into_owned())
 }

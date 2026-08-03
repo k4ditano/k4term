@@ -430,9 +430,7 @@ fn main() {
                                 for marca in &marcas {
                                     match marca {
                                         Marca::Empieza => this.empieza_bloque(cx),
-                                        Marca::Acaba { salida } => {
-                                            this.acaba_bloque(*salida, cx)
-                                        }
+                                        Marca::Acaba { salida } => this.acaba_bloque(*salida, cx),
                                     }
                                 }
                                 //  Ajustes cambiados en caliente: lo que se

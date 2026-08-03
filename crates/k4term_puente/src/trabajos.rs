@@ -20,7 +20,10 @@ pub enum Aviso {
 //  elige cómo se cuenta: la ventana lo manda por el IPC de la barra y la
 //  sesión de la isla lo escribe en su salida, que es el canal que ya tiene.
 pub enum Parte {
-    Empezado { mandato: String, segundos: u64 },
+    Empezado {
+        mandato: String,
+        segundos: u64,
+    },
     Acabado {
         mandato: String,
         salida: i32,

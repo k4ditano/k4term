@@ -63,15 +63,27 @@ impl Escaner {
     //  reconocido. Aguanta que una secuencia venga partida entre dos lecturas,
     //  que con un PTY pasa a menudo.
     pub fn tragar(&mut self, bytes: &[u8]) -> Vec<Suceso> {
+        self.tragar_con_sitio(bytes)
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect()
+    }
+
+    //  Lo mismo, diciendo además POR QUÉ BYTE iba cada suceso — el primero que
+    //  ya no es suyo. Quien apunta en qué fila de la pantalla ocurrió algo lo
+    //  necesita: si se traga el trozo entero y luego mira el cursor, la marca
+    //  cae donde acabó la ráfaga y no donde estaba el mandato. Se vio: copiar
+    //  la salida del último mandato empezaba tres líneas más abajo.
+    pub fn tragar_con_sitio(&mut self, bytes: &[u8]) -> Vec<(usize, Suceso)> {
         let mut sucesos = Vec::new();
 
-        for &b in bytes {
+        for (i, &b) in bytes.iter().enumerate() {
             match self.estado {
                 Estado::Fuera => {
                     if b == 0x1b {
                         self.estado = Estado::TrasEscape;
                     } else if b == 0x07 {
-                        sucesos.push(Suceso::Campana);
+                        sucesos.push((i + 1, Suceso::Campana));
                     }
                 }
                 Estado::TrasEscape => {
@@ -87,7 +99,7 @@ impl Escaner {
                 Estado::Dentro => match b {
                     0x07 | 0x9c => {
                         if let Some(s) = self.interpretar() {
-                            sucesos.push(s);
+                            sucesos.push((i + 1, s));
                         }
                         self.cerrar();
                     }
@@ -104,7 +116,7 @@ impl Escaner {
                 Estado::DentroTrasEscape => {
                     if b == b'\\' {
                         if let Some(s) = self.interpretar() {
-                            sucesos.push(s);
+                            sucesos.push((i + 1, s));
                         }
                         self.cerrar();
                     } else {
@@ -220,7 +232,10 @@ mod pruebas {
     fn aguanta_una_secuencia_partida_en_dos_lecturas() {
         let mut e = Escaner::new();
         assert!(e.tragar(b"salida normal\x1b]133;").is_empty());
-        assert_eq!(e.tragar(b"D;1\x07mas salida"), vec![Suceso::Termina { salida: 1 }]);
+        assert_eq!(
+            e.tragar(b"D;1\x07mas salida"),
+            vec![Suceso::Termina { salida: 1 }]
+        );
     }
 
     #[test]
@@ -232,7 +247,10 @@ mod pruebas {
     #[test]
     fn el_texto_corriente_no_dispara_nada() {
         let mut e = Escaner::new();
-        assert!(e.tragar(b"hola \x1b[31mrojo\x1b[0m y ] suelto\n").is_empty());
+        assert!(
+            e.tragar(b"hola \x1b[31mrojo\x1b[0m y ] suelto\n")
+                .is_empty()
+        );
     }
 
     #[test]

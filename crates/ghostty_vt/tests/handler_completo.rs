@@ -64,9 +64,17 @@ fn region_de_desplazamiento() {
     //  Región de la 2 a la 3, y un desplazamiento dentro.
     t.feed(b"\x1b[2;3r\x1b[3;1H\x1bD").unwrap();
 
-    assert_eq!(t.dump_viewport_row(0).unwrap().trim_end(), "A", "la 1 no se toca");
+    assert_eq!(
+        t.dump_viewport_row(0).unwrap().trim_end(),
+        "A",
+        "la 1 no se toca"
+    );
     assert_eq!(t.dump_viewport_row(1).unwrap().trim_end(), "C");
-    assert_eq!(t.dump_viewport_row(3).unwrap().trim_end(), "D", "la 4 no se toca");
+    assert_eq!(
+        t.dump_viewport_row(3).unwrap().trim_end(),
+        "D",
+        "la 4 no se toca"
+    );
 }
 
 #[test]
