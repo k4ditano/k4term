@@ -283,6 +283,15 @@ pub struct TerminalView {
     seco: bool,
 }
 
+pub struct Appearance {
+    pub font: gpui::Font,
+    pub size: Pixels,
+    pub padding: Pixels,
+    pub opacity: f32,
+    pub radius: f32,
+    pub trail: u8,
+}
+
 //  Un mandato: dónde empezó, dónde acabó y con qué código. Las filas van en
 //  coordenadas del historial y no de la pantalla, que es lo único que
 //  sobrevive a que la salida siga subiendo.
@@ -472,21 +481,12 @@ impl TerminalView {
 
     //  Todo lo que se puede cambiar sin reabrir la ventana, de una vez: es lo
     //  que hace que tocar un deslizador en Ajustes se note aquí al momento.
-    pub fn set_apariencia(
-        &mut self,
-        font: gpui::Font,
-        tamano: Pixels,
-        margen: Pixels,
-        opacidad: f32,
-        radio: f32,
-        estela: u8,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_font(font);
-        self.set_font_size(tamano);
-        self.set_padding(margen);
-        self.set_cristal(opacidad, radio);
-        self.set_estela(estela);
+    pub fn set_apariencia(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
+        self.set_font(appearance.font);
+        self.set_font_size(appearance.size);
+        self.set_padding(appearance.padding);
+        self.set_cristal(appearance.opacity, appearance.radius);
+        self.set_estela(appearance.trail);
         cx.notify();
     }
 
@@ -557,12 +557,12 @@ impl TerminalView {
 
     pub fn acaba_bloque(&mut self, salida: i32, cx: &mut Context<Self>) {
         let fila = self.fila_absoluta_del_cursor();
-        if let Some(b) = self.bloques.last_mut() {
-            if b.fin.is_none() {
-                b.fin = fila;
-                b.salida = Some(salida);
-                cx.notify();
-            }
+        if let Some(b) = self.bloques.last_mut()
+            && b.fin.is_none()
+        {
+            b.fin = fila;
+            b.salida = Some(salida);
+            cx.notify();
         }
     }
 
@@ -2010,19 +2010,18 @@ fn adornos_de_la_casa(
     }
 
     // ── el velo del modo tranquilo ────────────────────────────────
-    if vista.tranquilo {
-        if let Some(ultimo) = vista.bloques.last() {
-            if ultimo.inicio > arriba {
-                let hasta = (ultimo.inicio - arriba).min(filas as u32);
-                salida.push(fill(
-                    Bounds::new(
-                        point(bounds.left() - px(12.), bounds.top()),
-                        size(bounds.size.width + px(24.), line_height * hasta as f32),
-                    ),
-                    hsla(0., 0., 0., 0.55),
-                ));
-            }
-        }
+    if vista.tranquilo
+        && let Some(ultimo) = vista.bloques.last()
+        && ultimo.inicio > arriba
+    {
+        let hasta = (ultimo.inicio - arriba).min(filas as u32);
+        salida.push(fill(
+            Bounds::new(
+                point(bounds.left() - px(12.), bounds.top()),
+                size(bounds.size.width + px(24.), line_height * hasta as f32),
+            ),
+            hsla(0., 0., 0., 0.55),
+        ));
     }
 
     // ── la barra de desplazamiento ────────────────────────────────
@@ -2941,13 +2940,12 @@ impl Render for TerminalView {
         //  El título solo se toca cuando la sesión anuncia uno (OSC 0/2): el
         //  inicial lo pone el anfitrión en sus WindowOptions y no hay por qué
         //  machacárselo con un genérico.
-        if self.session.window_title_updates_enabled() {
-            if let Some(title) = self.session.title() {
-                if self.last_window_title.as_deref() != Some(title) {
-                    window.set_window_title(title);
-                    self.last_window_title = Some(title.to_string());
-                }
-            }
+        if self.session.window_title_updates_enabled()
+            && let Some(title) = self.session.title()
+            && self.last_window_title.as_deref() != Some(title)
+        {
+            window.set_window_title(title);
+            self.last_window_title = Some(title.to_string());
         }
 
         div()

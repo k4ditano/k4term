@@ -24,9 +24,9 @@ use std::time::Duration;
 
 use gpui::{App, AppContext, Application, KeyBinding, TitlebarOptions, WindowOptions};
 use gpui_ghostty_terminal::view::{
-    Copy, CopyLastOutput, DecreaseFontSize, Find, IncreaseFontSize, NextBlock, Paste, PreviousBlock,
-    ResetFontSize, SelectAll, SendBlockToNote, SendSessionToNote, TerminalInput, TerminalView,
-    ToggleQuiet,
+    Appearance, Copy, CopyLastOutput, DecreaseFontSize, Find, IncreaseFontSize, NextBlock, Paste,
+    PreviousBlock, ResetFontSize, SelectAll, SendBlockToNote, SendSessionToNote, TerminalInput,
+    TerminalView, ToggleQuiet,
 };
 use gpui_ghostty_terminal::{Rgb, TerminalConfig, TerminalSession};
 use k4term_puente::{Ajustes, Aviso, Suceso, barra, edinot, osc::Escaner, tema, trabajos};
@@ -439,12 +439,14 @@ fn main() {
                                 //  toque en la barra se ve aquí sin reabrir.
                                 if let Some(a) = &ajuste_nuevo {
                                     this.set_apariencia(
-                                        fuente(a.fuente.clone()),
-                                        gpui::px(a.tamano),
-                                        gpui::px(a.margen),
-                                        a.opacidad,
-                                        a.radio,
-                                        a.estela,
+                                        Appearance {
+                                            font: fuente(a.fuente.clone()),
+                                            size: gpui::px(a.tamano),
+                                            padding: gpui::px(a.margen),
+                                            opacity: a.opacidad,
+                                            radius: a.radio,
+                                            trail: a.estela,
+                                        },
                                         cx,
                                     );
                                 }
