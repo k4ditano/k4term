@@ -18,38 +18,73 @@ pub(crate) fn edinot_disponible() -> bool {
     ANOTADOR.get().is_some()
 }
 
-//  Los servidores de uno, para el selector de la ventana. La vista pinta y
-//  filtra; de dónde salen los hosts sabe el anfitrión, que es quien conoce
-//  `~/.ssh/config` — esta capa no tiene por qué.
+//  Los servidores de uno, para el selector de la ventana.
+//
+//  La vista pinta, filtra y decide qué tecla hace qué; de dónde salen los
+//  hosts y qué significa guardarlos lo sabe el anfitrión, que es quien conoce
+//  `~/.ssh/config`. Esta capa no tiene por qué saber nada de ssh.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Servidor {
     pub alias: String,
-    pub detalle: String,
+    pub usuario: String,
+    pub host: String,
+    pub puerto: String,
+    //  Lo que ssh entiende y no se ve en la lista, pero sí se configura.
+    pub clave: String,
+    pub salto: String,
     pub favorito: bool,
+    //  Y lo nuestro. Las etiquetas van como texto con espacios porque así es
+    //  como se escriben en el formulario; quien las guarde ya las partirá.
+    pub etiquetas: String,
+    pub al_conectar: String,
+    //  Un destino escrito al vuelo, todavía sin guardar: se pinta distinto y
+    //  es lo único que se puede guardar.
+    pub rapido: bool,
 }
 
-type Listado = dyn Fn() -> Vec<Servidor> + Send + Sync + 'static;
-static SERVIDORES: std::sync::OnceLock<Box<Listado>> = std::sync::OnceLock::new();
-
-type Visita = dyn Fn(String) + Send + Sync + 'static;
-static VISITA: std::sync::OnceLock<Box<Visita>> = std::sync::OnceLock::new();
-
-pub fn registrar_servidores(
-    lista: impl Fn() -> Vec<Servidor> + Send + Sync + 'static,
-    visita: impl Fn(String) + Send + Sync + 'static,
-) {
-    let _ = SERVIDORES.set(Box::new(lista));
-    let _ = VISITA.set(Box::new(visita));
-}
-
-pub(crate) fn servidores() -> Vec<Servidor> {
-    SERVIDORES.get().map(|f| f()).unwrap_or_default()
-}
-
-pub(crate) fn servidor_visitado(alias: &str) {
-    if let Some(f) = VISITA.get() {
-        f(alias.to_string());
+impl Servidor {
+    pub fn detalle(&self) -> String {
+        let usuario = if self.usuario.is_empty() {
+            String::new()
+        } else {
+            format!("{}@", self.usuario)
+        };
+        let puerto = if self.puerto.is_empty() || self.puerto == "22" {
+            String::new()
+        } else {
+            format!(":{}", self.puerto)
+        };
+        format!("{usuario}{}{puerto}", self.host)
     }
+}
+
+//  Todo lo que el selector necesita del mundo de fuera, junto: cinco cierres
+//  en vez de cinco huecos sueltos, que se registran de una vez y no puede
+//  quedarse la mitad puesta.
+//  Los tipos de cada cierre, con nombre: escritos a la cara son ilegibles y
+//  clippy tiene razón en decirlo.
+type Listar = dyn Fn() -> Vec<Servidor> + Send + Sync;
+type AlVuelo = dyn Fn(&str) -> Option<Servidor> + Send + Sync;
+type PorAlias = dyn Fn(&str) + Send + Sync;
+type PorServidor = dyn Fn(&Servidor) + Send + Sync;
+
+pub struct GestorServidores {
+    pub listar: Box<Listar>,
+    pub al_vuelo: Box<AlVuelo>,
+    pub visitar: Box<PorAlias>,
+    pub guardar: Box<PorServidor>,
+    pub favorito: Box<PorAlias>,
+    pub borrar: Box<PorAlias>,
+}
+
+static GESTOR: std::sync::OnceLock<GestorServidores> = std::sync::OnceLock::new();
+
+pub fn registrar_servidores(gestor: GestorServidores) {
+    let _ = GESTOR.set(gestor);
+}
+
+pub(crate) fn gestor_servidores() -> Option<&'static GestorServidores> {
+    GESTOR.get()
 }
 
 //  Devolver la sesión a la isla. Solo existe si hay barra que la reciba: una

@@ -175,26 +175,55 @@ fn main() {
         //  Los servidores salen de `~/.ssh/config`, que es de quien los tiene
         //  —no de una base de datos nuestra— y de `hosts.json` para lo que ese
         //  fichero no sabe decir. La vista solo pinta y filtra: de dónde viene
-        //  la lista lo sabe esta capa.
-        gpui_ghostty_terminal::registrar_servidores(
-            || {
-                servidores::leer()
-                    .into_iter()
-                    .map(|s| gpui_ghostty_terminal::Servidor {
-                        detalle: s.detalle(),
-                        alias: s.alias,
-                        favorito: s.favorito,
-                    })
-                    .collect()
-            },
-            |alias| {
+        //  la lista, y qué significa guardarla, lo sabe esta capa.
+        fn como_vista(s: k4term_puente::Servidor) -> gpui_ghostty_terminal::Servidor {
+            gpui_ghostty_terminal::Servidor {
+                alias: s.alias,
+                usuario: s.usuario,
+                host: s.host,
+                puerto: s.puerto,
+                clave: s.clave,
+                salto: s.salto,
+                favorito: s.favorito,
+                etiquetas: s.etiquetas.join(" "),
+                al_conectar: s.al_conectar,
+                rapido: false,
+            }
+        }
+
+        fn como_puente(s: &gpui_ghostty_terminal::Servidor) -> k4term_puente::Servidor {
+            k4term_puente::Servidor {
+                alias: s.alias.clone(),
+                host: s.host.clone(),
+                usuario: s.usuario.clone(),
+                puerto: s.puerto.clone(),
+                clave: s.clave.clone(),
+                salto: s.salto.clone(),
+                favorito: s.favorito,
+                ultimo: 0,
+                etiquetas: s.etiquetas.split_whitespace().map(str::to_string).collect(),
+                al_conectar: s.al_conectar.clone(),
+            }
+        }
+
+        gpui_ghostty_terminal::registrar_servidores(gpui_ghostty_terminal::GestorServidores {
+            listar: Box::new(|| servidores::leer().into_iter().map(como_vista).collect()),
+            al_vuelo: Box::new(|texto| servidores::como_destino(texto).map(como_vista)),
+            visitar: Box::new(|alias| {
                 let ahora = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                servidores::visitado(&alias, ahora);
-            },
-        );
+                servidores::visitado(alias, ahora);
+            }),
+            guardar: Box::new(|s| {
+                if let Err(fallo) = servidores::guardar(&como_puente(s)) {
+                    barra::decir("No se pudo guardar el servidor", &fallo);
+                }
+            }),
+            favorito: Box::new(servidores::favorito),
+            borrar: Box::new(servidores::borrar),
+        });
 
         //  El botón de ajustes solo existe si hay barra que los enseñe.
         if barra::hay_barra() {

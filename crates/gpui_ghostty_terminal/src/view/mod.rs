@@ -313,19 +313,102 @@ struct Servidores {
     patron: String,
     todos: Vec<crate::Servidor>,
     indice: usize,
+    //  Con formulario abierto, la lista se aparta: es la misma ventana
+    //  cambiando de cara, no un diálogo encima de otro.
+    editando: Option<Formulario>,
+}
+
+//  Los campos de un servidor, en el orden en que se rellenan. Los cinco
+//  primeros van a `~/.ssh/config` —los entiende ssh y los aprovechan scp, git
+//  y todo lo demás—; los dos últimos son nuestros.
+const CAMPOS: [(&str, &str); 8] = [
+    ("Nombre", "como lo vas a llamar"),
+    ("Máquina", "dominio o IP"),
+    ("Usuario", "vacío = el tuyo"),
+    ("Puerto", "vacío = 22"),
+    ("Clave", "ruta de la privada, si no la de siempre"),
+    ("Salto", "pasar por otro servidor (ProxyJump)"),
+    ("Etiquetas", "separadas por espacios, para buscar"),
+    ("Al entrar", "un mandato que se teclea al conectar"),
+];
+
+struct Formulario {
+    valores: [String; 8],
+    indice: usize,
+    favorito: bool,
+    //  Cómo se llamaba antes, para poder renombrar sin dejar el bloque viejo.
+    original: String,
+}
+
+impl Formulario {
+    fn de(servidor: &crate::Servidor) -> Self {
+        Self {
+            valores: [
+                servidor.alias.clone(),
+                servidor.host.clone(),
+                servidor.usuario.clone(),
+                servidor.puerto.clone(),
+                servidor.clave.clone(),
+                servidor.salto.clone(),
+                servidor.etiquetas.clone(),
+                servidor.al_conectar.clone(),
+            ],
+            indice: 0,
+            favorito: servidor.favorito,
+            original: if servidor.rapido {
+                String::new()
+            } else {
+                servidor.alias.clone()
+            },
+        }
+    }
+
+    fn servidor(&self) -> crate::Servidor {
+        crate::Servidor {
+            alias: self.valores[0].trim().to_string(),
+            host: self.valores[1].trim().to_string(),
+            usuario: self.valores[2].trim().to_string(),
+            puerto: self.valores[3].trim().to_string(),
+            clave: self.valores[4].trim().to_string(),
+            salto: self.valores[5].trim().to_string(),
+            etiquetas: self.valores[6].trim().to_string(),
+            al_conectar: self.valores[7].trim().to_string(),
+            favorito: self.favorito,
+            rapido: false,
+        }
+    }
 }
 
 impl Servidores {
-    fn filtrados(&self) -> Vec<&crate::Servidor> {
+    //  Lo que se ve: los guardados que casan, y por delante el destino escrito
+    //  al vuelo si lo que hay en la caja parece un sitio y no es ninguno de
+    //  ellos. Es lo que uno hace la primera vez, antes de tener nada guardado.
+    fn filtrados(&self) -> Vec<crate::Servidor> {
         let q = self.patron.trim().to_lowercase();
-        self.todos
+        let mut salida: Vec<crate::Servidor> = self
+            .todos
             .iter()
             .filter(|s| {
                 q.is_empty()
                     || s.alias.to_lowercase().contains(&q)
-                    || s.detalle.to_lowercase().contains(&q)
+                    || s.detalle().to_lowercase().contains(&q)
             })
-            .collect()
+            .cloned()
+            .collect();
+
+        if let Some(gestor) = crate::gestor_servidores()
+            && let Some(mut destino) = (gestor.al_vuelo)(&self.patron)
+        {
+            let ya_esta = salida
+                .iter()
+                .any(|s| s.alias == destino.alias || s.host == destino.host);
+            if !ya_esta {
+                destino.rapido = true;
+                salida.insert(0, destino);
+            }
+        }
+
+        salida
     }
 }
 
@@ -831,15 +914,28 @@ impl TerminalView {
             cx.notify();
             return;
         }
+        let todos = crate::gestor_servidores()
+            .map(|g| (g.listar)())
+            .unwrap_or_default();
         self.servidores = Some(Servidores {
             patron: String::new(),
-            todos: crate::servidores(),
+            todos,
             indice: 0,
+            editando: None,
         });
         cx.notify();
     }
 
     fn tecla_de_servidores(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
+        if self
+            .servidores
+            .as_ref()
+            .is_some_and(|s| s.editando.is_some())
+        {
+            self.tecla_de_formulario(keystroke, cx);
+            return;
+        }
+
         match keystroke.key.as_str() {
             "escape" => {
                 self.servidores = None;
@@ -873,6 +969,18 @@ impl TerminalView {
                 cx.notify();
                 return;
             }
+            "delete" => {
+                self.borrar_elegido(cx);
+                return;
+            }
+            "s" | "e" if keystroke.modifiers.control => {
+                self.editar_elegido(cx);
+                return;
+            }
+            "f" if keystroke.modifiers.control => {
+                self.favorito_elegido(cx);
+                return;
+            }
             _ => {}
         }
 
@@ -892,17 +1000,181 @@ impl TerminalView {
     //  No abrir otra ventana ni sustituir nada: estás en un prompt y lo que
     //  quieres es entrar, igual que si lo hubieras escrito tú.
     fn conectar_al_elegido(&mut self, cx: &mut Context<Self>) {
-        let elegido = self
-            .servidores
-            .as_ref()
-            .and_then(|s| s.filtrados().get(s.indice).map(|x| x.alias.clone()));
-        let Some(alias) = elegido else {
+        let Some(elegido) = self.elegido() else {
             return;
         };
 
-        crate::servidor_visitado(&alias);
+        //  Un guardado se llama por su alias y ya está: lo demás lo pone el
+        //  propio ssh leyendo su configuración. Solo el destino al vuelo lleva
+        //  el usuario y el puerto a cuestas.
+        let mandato = if elegido.rapido {
+            let usuario = if elegido.usuario.is_empty() {
+                String::new()
+            } else {
+                format!("{}@", elegido.usuario)
+            };
+            let puerto = if elegido.puerto.is_empty() {
+                String::new()
+            } else {
+                format!("-p {} ", elegido.puerto)
+            };
+            format!("ssh {puerto}{usuario}{}", elegido.host)
+        } else {
+            format!("ssh {}", elegido.alias)
+        };
+
+        if !elegido.rapido
+            && let Some(gestor) = crate::gestor_servidores()
+        {
+            (gestor.visitar)(&elegido.alias);
+        }
+
         self.servidores = None;
-        self.send_input_parts(&[format!("ssh {alias}\r").as_bytes()], cx);
+        self.send_input_parts(&[format!("{mandato}\r").as_bytes()], cx);
+        cx.notify();
+    }
+
+    fn elegido(&self) -> Option<crate::Servidor> {
+        self.servidores
+            .as_ref()
+            .and_then(|s| s.filtrados().get(s.indice).cloned())
+    }
+
+    //  Guardar el destino que acabas de escribir, marcar favorito y borrar:
+    //  lo que faltaba para que esto no fuera media pieza. Después de tocar el
+    //  fichero se vuelve a pedir la lista, que es la única forma de que lo
+    //  que se ve sea lo que hay.
+    //  Guardar no es escribirlo y ya: se abre el formulario con lo que se
+    //  sabe y se completa el resto, que es lo que uno quiere hacer justo
+    //  después. Y editar es lo mismo con un host que ya existe.
+    fn editar_elegido(&mut self, cx: &mut Context<Self>) {
+        let Some(elegido) = self.elegido() else {
+            return;
+        };
+        if let Some(s) = self.servidores.as_mut() {
+            s.editando = Some(Formulario::de(&elegido));
+        }
+        cx.notify();
+    }
+
+    fn tecla_de_formulario(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
+        match keystroke.key.as_str() {
+            "escape" => {
+                if let Some(s) = self.servidores.as_mut() {
+                    s.editando = None;
+                }
+                cx.notify();
+                return;
+            }
+            "enter" => {
+                self.guardar_formulario(cx);
+                return;
+            }
+            "up" | "down" | "tab" => {
+                if let Some(f) = self.servidores.as_mut().and_then(|s| s.editando.as_mut()) {
+                    let atras = keystroke.key == "up"
+                        || (keystroke.key == "tab" && keystroke.modifiers.shift);
+                    f.indice = if atras {
+                        f.indice.saturating_sub(1)
+                    } else {
+                        (f.indice + 1).min(CAMPOS.len() - 1)
+                    };
+                }
+                cx.notify();
+                return;
+            }
+            "backspace" => {
+                if let Some(f) = self.servidores.as_mut().and_then(|s| s.editando.as_mut()) {
+                    let i = f.indice;
+                    f.valores[i].pop();
+                }
+                cx.notify();
+                return;
+            }
+            //  Favorito es parte de cómo quieres el servidor, no una acción
+            //  aparte: se marca aquí mismo.
+            "f" if keystroke.modifiers.control => {
+                if let Some(f) = self.servidores.as_mut().and_then(|s| s.editando.as_mut()) {
+                    f.favorito = !f.favorito;
+                }
+                cx.notify();
+                return;
+            }
+            _ => {}
+        }
+
+        if keystroke.modifiers.control || keystroke.modifiers.alt {
+            return;
+        }
+        if let Some(texto) = keystroke.key_char.as_ref()
+            && let Some(f) = self.servidores.as_mut().and_then(|s| s.editando.as_mut())
+        {
+            let i = f.indice;
+            f.valores[i].push_str(texto);
+            cx.notify();
+        }
+    }
+
+    fn guardar_formulario(&mut self, cx: &mut Context<Self>) {
+        let Some(gestor) = crate::gestor_servidores() else {
+            return;
+        };
+        let (nuevo, original) = {
+            let Some(f) = self.servidores.as_ref().and_then(|s| s.editando.as_ref()) else {
+                return;
+            };
+            (f.servidor(), f.original.clone())
+        };
+
+        //  Sin nombre ni máquina no hay nada que guardar, y decírselo a gritos
+        //  sobraría: se queda donde está hasta que los rellene.
+        if nuevo.alias.is_empty() || nuevo.host.is_empty() {
+            return;
+        }
+
+        //  Renombrar es guardar el nuevo y quitar el viejo, en ese orden: si
+        //  fallara lo primero, no se habría perdido nada.
+        (gestor.guardar)(&nuevo);
+        if !original.is_empty() && original != nuevo.alias {
+            (gestor.borrar)(&original);
+        }
+
+        if let Some(s) = self.servidores.as_mut() {
+            s.editando = None;
+        }
+        self.refrescar_servidores(cx);
+    }
+
+    fn favorito_elegido(&mut self, cx: &mut Context<Self>) {
+        let (Some(elegido), Some(gestor)) = (self.elegido(), crate::gestor_servidores()) else {
+            return;
+        };
+        if elegido.rapido {
+            return;
+        }
+        (gestor.favorito)(&elegido.alias);
+        self.refrescar_servidores(cx);
+    }
+
+    fn borrar_elegido(&mut self, cx: &mut Context<Self>) {
+        let (Some(elegido), Some(gestor)) = (self.elegido(), crate::gestor_servidores()) else {
+            return;
+        };
+        if elegido.rapido {
+            return;
+        }
+        (gestor.borrar)(&elegido.alias);
+        self.refrescar_servidores(cx);
+    }
+
+    fn refrescar_servidores(&mut self, cx: &mut Context<Self>) {
+        if let Some(gestor) = crate::gestor_servidores()
+            && let Some(s) = self.servidores.as_mut()
+        {
+            s.todos = (gestor.listar)();
+            s.patron.clear();
+            s.indice = 0;
+        }
         cx.notify();
     }
 
@@ -3205,17 +3477,19 @@ impl Render for TerminalView {
             //  El selector de servidores, en medio y arriba: es una decisión
             //  —tapa parte de lo que hay debajo— pero elegir a dónde ir es lo
             //  único que estás haciendo mientras está abierto.
+            //  El selector de servidores, en medio y arriba: tapa parte de lo
+            //  que hay debajo, y es a propósito — elegir a dónde ir es lo
+            //  único que estás haciendo mientras está abierto.
             .children(self.servidores.as_ref().map(|s| {
-                let filtrados = s.filtrados();
-                let elegido = s.indice.min(filtrados.len().saturating_sub(1));
                 let radio = px(self.radio.max(10.));
+                let apagado = hsla(0., 0., 0.45, 1.0);
 
                 let mut caja = div()
                     .absolute()
                     .top_8()
                     .left_1_2()
-                    .w(px(420.))
-                    .ml(px(-210.))
+                    .w(px(520.))
+                    .ml(px(-260.))
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -3223,32 +3497,103 @@ impl Render for TerminalView {
                     .rounded(radio)
                     .bg(hsla(0., 0., 0.11, 0.97))
                     .border_1()
-                    .border_color(hsla(0., 0., 1.0, 0.08))
-                    .child(
+                    .border_color(hsla(0., 0., 1.0, 0.08));
+
+                if let Some(f) = s.editando.as_ref() {
+                    //  Configurando: arriba lo que entiende ssh, abajo lo
+                    //  nuestro, separados por una línea para que se vea de un
+                    //  vistazo qué va a dónde.
+                    caja = caja.child(
                         div()
                             .flex()
                             .gap_2()
                             .px_1()
                             .pb_1()
-                            .child(div().text_color(hsla(0., 0., 0.56, 1.0)).child("servidor"))
-                            .child(div().text_color(gpui::white()).child(s.patron.clone())),
+                            .child(div().text_color(apagado).child(if f.original.is_empty() {
+                                "servidor nuevo".to_string()
+                            } else {
+                                format!("editar {}", f.original)
+                            }))
+                            .child(
+                                div()
+                                    .text_color(if f.favorito {
+                                        hsla(0.13, 0.9, 0.6, 1.0)
+                                    } else {
+                                        apagado
+                                    })
+                                    .child(if f.favorito {
+                                        "★ favorito"
+                                    } else {
+                                        "☆ ctrl+F"
+                                    }),
+                            ),
                     );
+
+                    for (i, (nombre, ayuda)) in CAMPOS.iter().enumerate() {
+                        let activo = i == f.indice;
+                        let valor = f.valores[i].clone();
+                        //  La raya justo antes de lo nuestro.
+                        if i == 6 {
+                            caja = caja.child(div().h(px(1.)).my_1().bg(hsla(0., 0., 1.0, 0.08)));
+                        }
+                        caja = caja.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .px_2()
+                                .py_0p5()
+                                .rounded(px(8.))
+                                .when(activo, |d| d.bg(hsla(0., 0., 0.20, 1.0)))
+                                .child(
+                                    div()
+                                        .w(px(90.))
+                                        .text_color(if activo { gpui::white() } else { apagado })
+                                        .child(*nombre),
+                                )
+                                .child(if valor.is_empty() {
+                                    div().text_color(hsla(0., 0., 0.35, 1.0)).child(*ayuda)
+                                } else {
+                                    div().text_color(gpui::white()).child(valor)
+                                }),
+                        );
+                    }
+
+                    caja = caja.child(
+                        div()
+                            .px_2()
+                            .pt_1()
+                            .text_color(hsla(0., 0., 0.35, 1.0))
+                            .child("intro guarda · esc cancela · ↑↓ cambia de campo"),
+                    );
+
+                    return caja;
+                }
+
+                let filtrados = s.filtrados();
+                let elegido = s.indice.min(filtrados.len().saturating_sub(1));
+
+                caja = caja.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .px_1()
+                        .pb_1()
+                        .child(div().text_color(apagado).child("servidor"))
+                        .child(div().text_color(gpui::white()).child(s.patron.clone())),
+                );
 
                 if filtrados.is_empty() {
                     //  Sin nada que enseñar, decir por qué: la lista vacía la
                     //  primera vez no es un fallo, es que no has guardado
                     //  ninguno todavía.
-                    caja = caja.child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .text_color(hsla(0., 0., 0.45, 1.0))
-                            .child(if s.todos.is_empty() {
-                                "no hay servidores en ~/.ssh/config"
-                            } else {
-                                "ninguno con ese nombre"
-                            }),
-                    );
+                    caja = caja.child(div().px_2().py_1().text_color(apagado).child(
+                        if s.todos.is_empty() {
+                            "no hay servidores en ~/.ssh/config"
+                        } else {
+                            "ninguno con ese nombre"
+                        },
+                    ));
                 }
 
                 //  Ocho como mucho: una lista más larga que la pantalla no se
@@ -3269,24 +3614,34 @@ impl Render for TerminalView {
                                     .text_color(if servidor.favorito {
                                         hsla(0.13, 0.9, 0.6, 1.0)
                                     } else {
-                                        hsla(0., 0., 0.5, 1.0)
+                                        apagado
                                     })
-                                    .child(if servidor.favorito { "★" } else { "·" }),
+                                    .child(if servidor.favorito {
+                                        "★"
+                                    } else if servidor.rapido {
+                                        "+"
+                                    } else {
+                                        "·"
+                                    }),
                             )
-                            .child(
-                                div()
-                                    .text_color(gpui::white())
-                                    .child(servidor.alias.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_color(hsla(0., 0., 0.5, 1.0))
-                                    .child(servidor.detalle.clone()),
-                            ),
+                            .child(div().text_color(gpui::white()).child(if servidor.rapido {
+                                format!("conectar a {}", servidor.host)
+                            } else {
+                                servidor.alias.clone()
+                            }))
+                            .child(div().text_color(apagado).child(servidor.detalle())),
                     );
                 }
 
-                caja
+                //  Las teclas, en el pie y no en la fila: metidas al lado del
+                //  nombre se salían de la caja en cuanto el host era largo.
+                caja.child(
+                    div()
+                        .px_2()
+                        .pt_1()
+                        .text_color(hsla(0., 0., 0.35, 1.0))
+                        .child("intro conecta · ctrl+S guarda o edita · supr borra"),
+                )
             }))
             .children(self.busqueda.as_ref().map(|b| {
                 let total = b.resultados.len();
