@@ -120,7 +120,34 @@ fn directorio_inicial(pedido: Option<PathBuf>) -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
 
+//  La integración de la shell, dentro del binario.
+//
+//  Va embebida y no como fichero suelto porque el sitio donde vive el repo no
+//  se sabe desde una barra instalada, y sobre todo porque hace falta poder
+//  MANDARLA: llevarla a un servidor es `k4term --integracion zsh | ssh …`, y
+//  para eso tiene que salir por la salida estándar de algo que siempre está.
+const INTEGRACION_ZSH: &str = include_str!("../../../integracion/k4term.zsh");
+const INTEGRACION_FISH: &str = include_str!("../../../integracion/k4term.fish");
+
+fn escupir_integracion(cual: &str) -> bool {
+    let texto = match cual {
+        "zsh" => INTEGRACION_ZSH,
+        "fish" => INTEGRACION_FISH,
+        _ => return false,
+    };
+    print!("{texto}");
+    true
+}
+
 fn main() {
+    //  Enseñar la integración y salir: es lo que se le pasa por una tubería a
+    //  `ssh` para instalarla en el otro lado.
+    let argv: Vec<String> = std::env::args().collect();
+    if let Some(i) = argv.iter().position(|a| a == "--integracion") {
+        let cual = argv.get(i + 1).map(String::as_str).unwrap_or("");
+        std::process::exit(if escupir_integracion(cual) { 0 } else { 1 });
+    }
+
     //  El timbre, antes que nada: la máscara de señales se hereda, así que
     //  esto tiene que estar puesto antes de que GPUI levante sus hilos.
     let timbre = k4term_puente::senal::escuchar();
