@@ -261,6 +261,13 @@ fn main() {
                 config.default_bg = rgb(t.fondo);
             }
 
+            //  «Se acabó»: lo dicen los hilos y lo atiende el bucle de la
+            //  ventana. Salir con `process::exit` desde un hilo suelto mientras
+            //  el otro está pintando revienta dentro del controlador de vídeo
+            //  —comprobado, tres de tres con `k4term -e true`—: el proceso se
+            //  va de debajo de un fotograma a medio dibujar.
+            let (fin_tx, fin_rx) = mpsc::channel::<()>();
+
             //  Dos maneras de tener sesión: abrir una shell nuestra, o adoptar
             //  la que viene de la isla. Adoptar no es abrir otra igual — es
             //  que el shell de dentro, y el agente que esté pensando, y el
@@ -367,14 +374,15 @@ fn main() {
                         .spawn_command(cmd)
                         .expect("no arrancó la shell");
 
+                    let fin_del_hijo = fin_tx.clone();
                     thread::spawn(move || {
                         let _ = child.wait();
                         // Lo que estuviera corriendo se va con la ventana: que la
                         // barra no se quede con el indicador de un muerto.
                         barra::limpiar(std::process::id());
                         // Muere la shell (o el mandato de -e), muere la ventana: el
-                        // contrato de toda terminal.
-                        std::process::exit(0);
+                        // contrato de toda terminal. Se pide, no se ejecuta aquí.
+                        let _ = fin_del_hijo.send(());
                     });
 
                     pty_reader = Box::new(master.try_clone_reader().expect("lector del pty"));
@@ -454,6 +462,7 @@ fn main() {
             //  El lector es también quien vigila los marcadores de la shell:
             //  los bytes pasan por aquí antes de llegar al terminal, así que
             //  se miran al vuelo y siguen intactos.
+            let fin_del_chorro = fin_tx.clone();
             let (campana_tx, campana_rx) = mpsc::channel::<()>();
             let (marcas_tx, marcas_rx) = mpsc::channel::<Marca>();
             let avisos = trabajos::notificador(std::process::id());
@@ -510,7 +519,7 @@ fn main() {
                 //  a quien esperar —lo adoptó el sistema al soltarla—, así que
                 //  este es el único aviso de que aquí ya no queda nada.
                 barra::limpiar(std::process::id());
-                std::process::exit(0);
+                let _ = fin_del_chorro.send(());
             });
 
             let view = cx.new(|cx| {
@@ -562,6 +571,13 @@ fn main() {
                         let marcas: Vec<Marca> =
                             std::iter::from_fn(|| marcas_rx.try_recv().ok()).collect();
                         let ajuste_nuevo = std::iter::from_fn(|| cambios.try_recv().ok()).last();
+
+                        //  Y si la sesión se acabó, aquí es donde se cierra la
+                        //  ventana: en el hilo que pinta y entre fotogramas.
+                        if fin_rx.try_recv().is_ok() {
+                            cx.update(|_, cx| cx.quit()).ok();
+                            return;
+                        }
                         //  ¿Han llamado a la puerta? Es la barra diciendo
                         //  «devuélvete a la isla».
                         let llaman = std::iter::from_fn(|| timbre.try_recv().ok()).count() > 0;
