@@ -184,6 +184,8 @@ fn main() {
                 puerto: s.puerto,
                 clave: s.clave,
                 salto: s.salto,
+                tinte: s.tinte,
+                tuneles: s.tuneles,
                 favorito: s.favorito,
                 etiquetas: s.etiquetas.join(" "),
                 al_conectar: s.al_conectar,
@@ -199,6 +201,8 @@ fn main() {
                 puerto: s.puerto.clone(),
                 clave: s.clave.clone(),
                 salto: s.salto.clone(),
+                tinte: s.tinte.clone(),
+                tuneles: s.tuneles.clone(),
                 favorito: s.favorito,
                 ultimo: 0,
                 etiquetas: s.etiquetas.split_whitespace().map(str::to_string).collect(),
@@ -223,6 +227,12 @@ fn main() {
             }),
             favorito: Box::new(servidores::favorito),
             borrar: Box::new(servidores::borrar),
+            //  Entrar y salir se lo cuenta a la barra, que es quien tiene
+            //  dónde enseñarlo: la píldora dice a qué estás conectado y se va
+            //  sola al salir.
+            conectado: Box::new(|destino| barra::conectado(std::process::id(), destino)),
+            desconectado: Box::new(|| barra::desconectado(std::process::id())),
+            color: Box::new(servidores::color_del_tinte),
         });
 
         //  El botón de ajustes solo existe si hay barra que los enseñe.

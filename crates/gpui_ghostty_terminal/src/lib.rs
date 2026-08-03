@@ -32,6 +32,10 @@ pub struct Servidor {
     //  Lo que ssh entiende y no se ve en la lista, pero sí se configura.
     pub clave: String,
     pub salto: String,
+    //  De qué color se pone la terminal mientras estás dentro, y qué túneles
+    //  se levantan con la conexión. Nuestros los dos.
+    pub tinte: String,
+    pub tuneles: String,
     pub favorito: bool,
     //  Y lo nuestro. Las etiquetas van como texto con espacios porque así es
     //  como se escriben en el formulario; quien las guarde ya las partirá.
@@ -75,6 +79,13 @@ pub struct GestorServidores {
     pub guardar: Box<PorServidor>,
     pub favorito: Box<PorAlias>,
     pub borrar: Box<PorAlias>,
+    //  Entrar y salir de un sitio: quien lo sepa lo cuenta —hoy, la barra,
+    //  que lo enseña en la píldora—. La vista no sabe que existe una barra.
+    pub conectado: Box<PorAlias>,
+    pub desconectado: Box<dyn Fn() + Send + Sync>,
+    //  De nombre de color a color. Lo resuelve el anfitrión porque la paleta
+    //  de la casa es suya: aquí solo se sabe mezclar.
+    pub color: Box<dyn Fn(&str) -> Option<(u8, u8, u8)> + Send + Sync>,
 }
 
 static GESTOR: std::sync::OnceLock<GestorServidores> = std::sync::OnceLock::new();

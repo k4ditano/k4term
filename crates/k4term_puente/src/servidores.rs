@@ -30,10 +30,13 @@ pub struct Servidor {
     pub salto: String,
     pub favorito: bool,
     pub ultimo: u64,
-    //  Y lo nuestro, que ssh_config no sabe decir: cómo agrupar y qué correr
-    //  nada más entrar.
+    //  Y lo nuestro, que ssh_config no sabe decir: cómo agrupar, qué correr
+    //  nada más entrar, de qué color se pone la terminal mientras estás
+    //  dentro, y qué túneles se levantan con la conexión.
     pub etiquetas: Vec<String>,
     pub al_conectar: String,
+    pub tinte: String,
+    pub tuneles: String,
 }
 
 impl Servidor {
@@ -63,6 +66,10 @@ struct Extra {
     etiquetas: Vec<String>,
     #[serde(default, rename = "alConectar")]
     al_conectar: String,
+    #[serde(default)]
+    tinte: String,
+    #[serde(default)]
+    tuneles: String,
 }
 
 fn casa() -> PathBuf {
@@ -124,6 +131,8 @@ pub fn leer() -> Vec<Servidor> {
                 ultimo: extra.map(|e| e.ultimo).unwrap_or(0),
                 etiquetas: extra.map(|e| e.etiquetas.clone()).unwrap_or_default(),
                 al_conectar: extra.map(|e| e.al_conectar.clone()).unwrap_or_default(),
+                tinte: extra.map(|e| e.tinte.clone()).unwrap_or_default(),
+                tuneles: extra.map(|e| e.tuneles.clone()).unwrap_or_default(),
             });
             continue;
         }
@@ -226,6 +235,8 @@ pub fn como_destino(texto: &str) -> Option<Servidor> {
         ultimo: 0,
         etiquetas: Vec::new(),
         al_conectar: String::new(),
+        tinte: String::new(),
+        tuneles: String::new(),
     })
 }
 
@@ -388,6 +399,45 @@ fn permisos(ruta: &std::path::Path, modo: u32) {
     let _ = std::fs::set_permissions(ruta, std::fs::Permissions::from_mode(modo));
 }
 
+//  El color de un sitio, en la paleta de la casa. Se guarda por NOMBRE y no
+//  por hexadecimal porque lo que uno quiere decir es «producción es roja», no
+//  «producción es #ff453a» — y así el día que cambie el tema, cambia con él.
+pub fn color_del_tinte(nombre: &str) -> Option<(u8, u8, u8)> {
+    match nombre.trim().to_lowercase().as_str() {
+        "rojo" => Some((0xff, 0x45, 0x3a)),
+        "ambar" | "ámbar" | "naranja" => Some((0xff, 0x9f, 0x0a)),
+        "verde" => Some((0x30, 0xd1, 0x58)),
+        "azul" => Some((0x0a, 0x84, 0xff)),
+        "morado" => Some((0xbf, 0x5a, 0xf2)),
+        "rosa" => Some((0xff, 0x37, 0x5f)),
+        _ => {
+            //  Y si alguien escribe un hexadecimal, se respeta: es su
+            //  terminal.
+            let h = nombre.trim().trim_start_matches('#');
+            if h.len() == 6 && h.chars().all(|c| c.is_ascii_hexdigit()) {
+                let n = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0);
+                Some((n(0), n(2), n(4)))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+//  El fondo de la terminal, teñido hacia ese color. Poco: lo justo para que
+//  se note de reojo y no para pintar una pared — leer sobre un rojo saturado
+//  es imposible, y el sentido de esto es saber dónde estás sin dejar de
+//  trabajar.
+pub fn fondo_tenido(fondo: (u8, u8, u8), tinte: (u8, u8, u8)) -> (u8, u8, u8) {
+    const FUERZA: f32 = 0.18;
+    let mezcla = |a: u8, b: u8| (a as f32 * (1.0 - FUERZA) + b as f32 * FUERZA).round() as u8;
+    (
+        mezcla(fondo.0, tinte.0),
+        mezcla(fondo.1, tinte.1),
+        mezcla(fondo.2, tinte.2),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +445,19 @@ mod tests {
     //  Borrar un host se lleva SU bloque y nada más: ni el de al lado, ni las
     //  líneas sueltas del suyo. `HostName` empieza por «host» y ahí estuvo el
     //  fallo — dejaba la línea huérfana en el fichero.
+    #[test]
+    fn el_tinte_entiende_nombres_y_hexadecimales() {
+        assert_eq!(color_del_tinte("rojo"), Some((0xff, 0x45, 0x3a)));
+        assert_eq!(color_del_tinte("  Ámbar "), Some((0xff, 0x9f, 0x0a)));
+        assert_eq!(color_del_tinte("#101820"), Some((0x10, 0x18, 0x20)));
+        assert_eq!(color_del_tinte("morado claro"), None);
+        assert_eq!(color_del_tinte(""), None);
+
+        //  Y teñir es un empujón, no una pared: el fondo sigue siendo fondo.
+        let tenido = fondo_tenido((0x1c, 0x1c, 0x1e), (0xff, 0x45, 0x3a));
+        assert!(tenido.0 > 0x1c && tenido.0 < 0x60, "quedó {tenido:?}");
+    }
+
     #[test]
     fn borrar_se_lleva_el_bloque_entero_y_solo_ese() {
         let crudo = "\

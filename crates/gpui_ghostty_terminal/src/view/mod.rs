@@ -268,6 +268,15 @@ pub struct TerminalView {
     font_size_base: Option<Pixels>,
     busqueda: Option<Busqueda>,
     servidores: Option<Servidores>,
+    //  El color del sitio donde estás, mientras estás. Se aplica al fondo por
+    //  defecto del terminal —no a un marco ni a una barra de estado— porque
+    //  así tiñe TODO lo que no lleva color propio, que es casi todo, y se ve
+    //  de reojo sin leer nada.
+    tinte: Option<ghostty_vt::Rgb>,
+    //  A qué sitio, para poder decir que se ha salido de él.
+    conectado_a: Option<String>,
+    //  El fondo que había antes de teñir, para devolverlo al salir.
+    fondo_sin_tinte: Option<ghostty_vt::Rgb>,
     //  Una conexión en marcha: a dónde y desde cuándo. Mientras dura se pinta
     //  el camino —de aquí, por la llave, hasta allí— porque un `ssh` que tarda
     //  tres segundos sin decir nada parece una terminal colgada.
@@ -333,7 +342,7 @@ struct Servidores {
 //  Los campos de un servidor, en el orden en que se rellenan. Los cinco
 //  primeros van a `~/.ssh/config` —los entiende ssh y los aprovechan scp, git
 //  y todo lo demás—; los dos últimos son nuestros.
-const CAMPOS: [(&str, &str); 8] = [
+const CAMPOS: [(&str, &str); 10] = [
     ("Nombre", "como lo vas a llamar"),
     ("Máquina", "dominio o IP"),
     ("Usuario", "vacío = el tuyo"),
@@ -342,10 +351,18 @@ const CAMPOS: [(&str, &str); 8] = [
     ("Salto", "pasar por otro servidor (ProxyJump)"),
     ("Etiquetas", "separadas por espacios, para buscar"),
     ("Al entrar", "un mandato que se teclea al conectar"),
+    (
+        "Color",
+        "rojo, ámbar, verde, azul, morado — para saber dónde estás",
+    ),
+    (
+        "Túneles",
+        "8080:localhost:80  ·  socks:1080  ·  R:9000:localhost:9000",
+    ),
 ];
 
 struct Formulario {
-    valores: [String; 8],
+    valores: [String; 10],
     indice: usize,
     favorito: bool,
     //  Cómo se llamaba antes, para poder renombrar sin dejar el bloque viejo.
@@ -364,6 +381,8 @@ impl Formulario {
                 servidor.salto.clone(),
                 servidor.etiquetas.clone(),
                 servidor.al_conectar.clone(),
+                servidor.tinte.clone(),
+                servidor.tuneles.clone(),
             ],
             indice: 0,
             favorito: servidor.favorito,
@@ -385,6 +404,8 @@ impl Formulario {
             salto: self.valores[5].trim().to_string(),
             etiquetas: self.valores[6].trim().to_string(),
             al_conectar: self.valores[7].trim().to_string(),
+            tinte: self.valores[8].trim().to_string(),
+            tuneles: self.valores[9].trim().to_string(),
             favorito: self.favorito,
             rapido: false,
         }
@@ -488,6 +509,9 @@ impl TerminalView {
             font_size_base: None,
             busqueda: None,
             servidores: None,
+            tinte: None,
+            conectado_a: None,
+            fondo_sin_tinte: None,
             conectando: None,
             ultimo_tecleado: None,
             campana_hasta: None,
@@ -549,6 +573,9 @@ impl TerminalView {
             font_size_base: None,
             busqueda: None,
             servidores: None,
+            tinte: None,
+            conectado_a: None,
+            fondo_sin_tinte: None,
             conectando: None,
             ultimo_tecleado: None,
             campana_hasta: None,
@@ -684,6 +711,18 @@ impl TerminalView {
     }
 
     pub fn acaba_bloque(&mut self, salida: i32, cx: &mut Context<Self>) {
+        //  Se acabó el mandato: si era la conexión, se acabó la conexión. Es
+        //  el único aviso fiable que hay —lo dice la shell de aquí, no la de
+        //  allí— y sirve igual para una salida limpia que para un corte.
+        if self.tinte.is_some() {
+            self.tenir(None, cx);
+        }
+        if self.conectado_a.take().is_some()
+            && let Some(gestor) = crate::gestor_servidores()
+        {
+            (gestor.desconectado)();
+        }
+
         let fila = self.fila_absoluta_del_cursor();
         if let Some(b) = self.bloques.last_mut()
             && b.fin.is_none()
@@ -1043,6 +1082,26 @@ impl TerminalView {
             (gestor.visitar)(&elegido.alias);
         }
 
+        //  El color del sitio, desde ya: la espera también es «estar yendo
+        //  allí», y verlo cambiar es parte de saber a dónde vas.
+        if let Some(gestor) = crate::gestor_servidores() {
+            if let Some((r, g, b)) = (gestor.color)(&elegido.tinte) {
+                self.tenir(Some(ghostty_vt::Rgb { r, g, b }), cx);
+            } else if self.tinte.is_some() {
+                self.tenir(None, cx);
+            }
+            (gestor.conectado)(if elegido.rapido {
+                &elegido.host
+            } else {
+                &elegido.alias
+            });
+        }
+        self.conectado_a = Some(if elegido.rapido {
+            elegido.host.clone()
+        } else {
+            elegido.alias.clone()
+        });
+
         self.servidores = None;
         self.conectando = Some((
             if elegido.rapido {
@@ -1334,6 +1393,34 @@ impl TerminalView {
 
     // Cambiar el ambiente en marcha. Hay que rehacer el viewport: las celdas
     // que heredan el color por defecto lo llevan ya resuelto dentro.
+    //  Teñir el fondo mientras dura la conexión, y devolverlo al salir. El
+    //  fondo de antes se guarda aquí y no se recalcula: entre medias el
+    //  ambiente de la barra puede haber cambiado el tema, y devolver «el
+    //  fondo de siempre» sería devolver otro.
+    fn tenir(&mut self, tinte: Option<ghostty_vt::Rgb>, cx: &mut Context<Self>) {
+        let fg = self.session.default_foreground();
+        match tinte {
+            Some(color) => {
+                let base = self
+                    .fondo_sin_tinte
+                    .unwrap_or_else(|| self.session.default_background());
+                self.fondo_sin_tinte = Some(base);
+                self.tinte = Some(color);
+                let (r, g, b) = mezclar((base.r, base.g, base.b), (color.r, color.g, color.b));
+                self.session
+                    .set_default_colors(fg, ghostty_vt::Rgb { r, g, b });
+            }
+            None => {
+                if let Some(base) = self.fondo_sin_tinte.take() {
+                    self.session.set_default_colors(fg, base);
+                }
+                self.tinte = None;
+            }
+        }
+        self.refresh_viewport();
+        cx.notify();
+    }
+
     pub fn set_default_colors(
         &mut self,
         fg: ghostty_vt::Rgb,
@@ -3868,6 +3955,19 @@ impl Render for TerminalView {
                     )
             }))
     }
+}
+
+//  El fondo empujado hacia un color. Poco: lo justo para que se note de reojo
+//  y no para pintar una pared — leer sobre un rojo saturado es imposible, y el
+//  sentido de esto es saber dónde estás sin dejar de trabajar.
+fn mezclar(fondo: (u8, u8, u8), tinte: (u8, u8, u8)) -> (u8, u8, u8) {
+    const FUERZA: f32 = 0.18;
+    let m = |a: u8, b: u8| (a as f32 * (1.0 - FUERZA) + b as f32 * FUERZA).round() as u8;
+    (
+        m(fondo.0, tinte.0),
+        m(fondo.1, tinte.1),
+        m(fondo.2, tinte.2),
+    )
 }
 
 pub(crate) fn cell_metrics(

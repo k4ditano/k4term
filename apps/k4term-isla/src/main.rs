@@ -148,6 +148,9 @@ enum Orden {
     //  Al prompt anterior (-1) o al siguiente (1).
     #[serde(rename = "saltar")]
     Saltar { hacia: i32 },
+    //  El color del sitio donde estás. Vacío lo quita.
+    #[serde(rename = "tinte")]
+    Tinte { color: String },
     //  Plegar o desplegar la salida de un mandato, por la fila del historial
     //  donde empieza.
     #[serde(rename = "plegar")]
@@ -195,6 +198,9 @@ enum Recado {
     //  único que tiene las marcas y el historial en las mismas coordenadas.
     Saltar {
         hacia: i32,
+    },
+    Tinte {
+        color: String,
     },
     Plegar {
         fila: u32,
@@ -765,7 +771,15 @@ fn motor(
         Err(_) => return,
     };
 
-    let mut fondo = Rgb { r: 0, g: 0, b: 0 };
+    //  Los colores de casa, guardados aparte: al teñir por un servidor hay que
+    //  poder volver a ellos, y recalcularlos no valdría —el ambiente de la
+    //  barra puede haber cambiado el tema mientras estabas dentro.
+    let mut fondo_base = Rgb { r: 0, g: 0, b: 0 };
+    let mut tinta_base = Rgb {
+        r: 0xff,
+        g: 0xff,
+        b: 0xff,
+    };
     //  El gris de la casa (`muted`) para lo que no reclama atención: la línea
     //  de una salida recogida es eso — está ahí, no molesta, y se despliega si
     //  la quieres. No viene en el tema porque el tema solo publica fondo y
@@ -776,21 +790,19 @@ fn motor(
         b: 0x93,
     };
     if let Some(t) = tema::leer(&tema::ruta_por_defecto()) {
-        fondo = Rgb {
+        fondo_base = Rgb {
             r: t.fondo.r,
             g: t.fondo.g,
             b: t.fondo.b,
         };
-        term.set_default_colors(
-            Rgb {
-                r: t.tinta.r,
-                g: t.tinta.g,
-                b: t.tinta.b,
-            },
-            fondo,
-        );
+        tinta_base = Rgb {
+            r: t.tinta.r,
+            g: t.tinta.g,
+            b: t.tinta.b,
+        };
+        term.set_default_colors(tinta_base, fondo_base);
     }
-    let fondo = hex(fondo);
+    let mut fondo = hex(fondo_base);
     let apagado = hex(apagado);
 
     let mut cols = COLS;
@@ -973,6 +985,28 @@ fn motor(
                         texto: fallo,
                     }),
                 }
+            }
+            Ok(Recado::Tinte { color }) => {
+                //  Se tiñe el FONDO POR DEFECTO del terminal y no se pinta un
+                //  marco: así queda teñido todo lo que no lleva color propio,
+                //  que es casi todo, y se ve de reojo sin leer nada. Y se
+                //  guarda el de antes, que el ambiente de la barra puede
+                //  cambiar el tema mientras estás dentro.
+                let nuevo = match k4term_puente::servidores::color_del_tinte(&color) {
+                    Some((r, g, b)) => {
+                        let base = fondo_base;
+                        let (r, g, b) = k4term_puente::servidores::fondo_tenido(
+                            (base.r, base.g, base.b),
+                            (r, g, b),
+                        );
+                        Rgb { r, g, b }
+                    }
+                    None => fondo_base,
+                };
+                fondo = hex(nuevo);
+                term.set_default_colors(tinta_base, nuevo);
+                sucio = true;
+                desde.get_or_insert_with(Instant::now);
             }
             Ok(Recado::Plegar { fila }) => {
                 //  Se pliega por la fila donde empieza el bloque, que es lo
@@ -1535,6 +1569,9 @@ fn main() {
                 }
                 Orden::Saltar { hacia } => {
                     let _ = tx.send(Recado::Saltar { hacia });
+                }
+                Orden::Tinte { color } => {
+                    let _ = tx.send(Recado::Tinte { color });
                 }
                 Orden::Plegar { fila } => {
                     let _ = tx.send(Recado::Plegar { fila });

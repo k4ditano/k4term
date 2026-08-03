@@ -103,6 +103,17 @@ pub fn decir(titulo: &str, cuerpo: &str) {
     llamar(&["decir", titulo, cuerpo]);
 }
 
+//  Entrar en un sitio y salir de él. La barra lo enseña en la píldora: saber
+//  a qué estás conectado sin mirar el prompt es media pelea, sobre todo con
+//  varias ventanas abiertas.
+pub fn conectado(pid: u32, destino: &str) {
+    llamar(&["conectado", &pid.to_string(), destino]);
+}
+
+pub fn desconectado(pid: u32) {
+    llamar(&["desconectado", &pid.to_string()]);
+}
+
 //  «Llévate esta sesión»: la barra abre una terminal en la isla que se la
 //  queda por ese socket. Lo que corre dentro no se entera de nada.
 pub fn adoptar(socket: &str) {
