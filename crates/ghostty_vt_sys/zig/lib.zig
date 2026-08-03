@@ -42,6 +42,13 @@ const TerminalHandle = struct {
         const t = try terminal.Terminal.init(alloc, .{
             .cols = cols,
             .rows = rows,
+            //  El historial que se guarda, en BYTES —no en líneas—, que es
+            //  como lo cuenta la lista de páginas de ghostty. Su defecto son
+            //  10 KB, o sea unas pocas decenas de filas: bastaba para no
+            //  notarlo hasta que uno miraba hacia arriba, y entonces el
+            //  histórico sencillamente no estaba. Diez megas es lo que trae
+            //  Ghostty de casa y da para decenas de miles de líneas.
+            .max_scrollback = 10 * 1024 * 1024,
         });
         errdefer {
             var tmp = t;

@@ -34,7 +34,25 @@ pub fn repintar(term: &Terminal, filas: u16, titulo: &str) -> String {
         }
     }
 
+    //  Hasta dónde se pinta: la última fila con algo escrito, o la del
+    //  cursor si va por debajo. Pintar el hueco vacío que quedaba por abajo
+    //  no es inocente — al llegar a una isla, ese hueco la abre entera y deja
+    //  el texto pegado al fondo con un vacío raro por encima.
+    let (col, fila) = term.cursor_position().unwrap_or((1, 1));
+    let mut ultima = 0u16;
     for f in 0..filas {
+        if !term
+            .dump_viewport_row(f)
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
+            ultima = f + 1;
+        }
+    }
+    let hasta = ultima.max(fila).max(1);
+
+    for f in 0..hasta {
         let texto: Vec<char> = term
             .dump_viewport_row(f)
             .unwrap_or_default()
@@ -68,19 +86,43 @@ pub fn repintar(term: &Terminal, filas: u16, titulo: &str) -> String {
         }
 
         out.push_str("\x1b[0m");
-        if f + 1 < filas {
+        if f + 1 < hasta {
             out.push_str("\r\n");
         }
     }
 
-    let (col, fila) = term.cursor_position().unwrap_or((1, 1));
-    out.push_str(&format!("\x1b[{fila};{col}H"));
+    //  Y el cursor donde estaba, pero contado DESDE ABAJO. En absoluto
+    //  (`CSI fila;col H`) valdría solo si el sitio nuevo tuviera exactamente
+    //  las mismas filas que el viejo: al pasar de una ventana alta a la isla,
+    //  colocarlo en la fila 45 es lo que abría la caja entera para nada.
+    let subir = hasta.saturating_sub(fila);
+    if subir > 0 {
+        out.push_str(&format!("\x1b[{subir}A"));
+    }
+    out.push_str(&format!("\x1b[{col}G"));
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    //  Lo que fallaba: una pantalla alta y medio vacía llegaba entera, con su
+    //  hueco, y al otro lado eso abría la caja del todo con el texto pegado
+    //  al fondo. Lo que se manda ahora acaba donde acaba el contenido.
+    #[test]
+    fn el_hueco_de_abajo_no_viaja() {
+        let mut alto = Terminal::new(20, 40).unwrap();
+        alto.feed(b"una\r\ndos").unwrap();
+
+        let bytes = repintar(&alto, 40, "");
+        assert_eq!(bytes.matches("\r\n").count(), 1);
+
+        //  Y al llegar a un sitio bajo, el cursor queda pegado al texto.
+        let mut bajo = Terminal::new(20, 6).unwrap();
+        bajo.feed(bytes.as_bytes()).unwrap();
+        assert_eq!(bajo.cursor_position().unwrap(), (4, 2));
+    }
 
     #[test]
     fn la_pantalla_se_repinta_en_otro_terminal() {

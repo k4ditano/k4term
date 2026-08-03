@@ -162,3 +162,18 @@ fn osc8_links_are_reported_as_column_spans() {
     //  Y una fila sin enlaces no devuelve nada.
     assert!(term.row_hyperlinks(1).is_empty());
 }
+
+//  El historial que se guarda. El defecto de ghostty son 10 KB —unas pocas
+//  decenas de filas— y con eso mirar hacia arriba en una sesión de trabajo no
+//  encontraba nada. Se ejerce de verdad: mil líneas y a ver si están.
+#[test]
+fn the_scrollback_keeps_a_working_session() {
+    let mut term = ghostty_vt::Terminal::new(80, 10).unwrap();
+    for n in 1..=1000 {
+        term.feed(format!("linea-{n}\r\n").as_bytes()).unwrap();
+    }
+
+    let (_, total) = term.viewport_position().unwrap();
+    assert!(total > 900, "el historial se quedó en {total} filas");
+    assert_eq!(term.dump_screen_row(0).unwrap().trim_end(), "linea-1");
+}
