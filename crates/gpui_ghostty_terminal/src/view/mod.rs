@@ -9,6 +9,7 @@ use gpui::{
 };
 use std::ops::Range;
 use std::sync::Once;
+use std::time::{Duration, Instant};
 
 actions!(
     terminal_view,
@@ -276,7 +277,7 @@ pub struct TerminalView {
     cursor_pintado: Option<gpui::Point<Pixels>>,
     cursor_moviendose: bool,
     //  Por dónde acaba de pasar el cursor, para la estela.
-    cursor_estela: Vec<gpui::Point<Pixels>>,
+    cursor_estela: Vec<CursorTrailGhost>,
     estela_largo: u8,
     //  El depósito de chispa de la barra, seco.
     seco: bool,
@@ -308,6 +309,16 @@ struct Busqueda {
 struct ByteSelection {
     anchor: usize,
     active: usize,
+}
+
+// A Kitty-style trail is an after-image, not a delayed cursor. Keeping the
+// cursor itself snapped to the terminal position avoids making fast typing
+// look as if characters have extra spacing.
+#[derive(Clone, Copy)]
+struct CursorTrailGhost {
+    position: gpui::Point<Pixels>,
+    started: Instant,
+    lifetime: Duration,
 }
 
 impl ByteSelection {
@@ -442,6 +453,7 @@ impl TerminalView {
         self.estela_largo = largo.min(24);
         if largo == 0 {
             self.cursor_estela.clear();
+            self.cursor_moviendose = false;
         }
     }
 
@@ -737,7 +749,7 @@ impl TerminalView {
     //  en su bucle: sin esto, el cursor se quedaría a medio camino hasta que
     //  llegara salida nueva.
     pub fn animando(&self) -> bool {
-        self.cursor_moviendose
+        self.cursor_moviendose || !self.cursor_estela.is_empty()
     }
 
     pub fn campana_encendida(&mut self, cx: &mut Context<Self>) -> bool {
@@ -2675,71 +2687,43 @@ impl Element for TerminalTextElement {
             let byte_index = byte_index_for_column_in_line(line.text.as_str(), col);
             let x = bounds.left() + line.x_for_index(byte_index.min(line.text.len()));
 
-            //  Deslizarse en vez de teletransportarse, y dejando estela: es
-            //  la diferencia entre «terminal» y «terminal cara». Persigue
-            //  también en los saltos de línea —ahí es donde más se luce— y
-            //  solo se planta de golpe cuando el salto es enorme, que es una
-            //  pantalla nueva y no un movimiento.
+            //  Kitty's trail is an after-image: the real cursor follows the
+            //  terminal immediately, while only large jumps leave a fading
+            //  ghost. This avoids a visible input lag when typing quickly.
             let destino = point(x, y);
             let pintado = self.view.update(cx, |vista, _| {
                 let anterior = vista.cursor_pintado.unwrap_or(destino);
-                let dx = f32::from(destino.x - anterior.x).abs();
-                let dy = f32::from(destino.y - anterior.y).abs();
-                let salto_enorme = dy > f32::from(line_height) * 12.0;
+                let ancho = cell_width.map(f32::from).unwrap_or(8.0).max(1.0);
+                let alto = f32::from(line_height).max(1.0);
+                let dx = f32::from(destino.x - anterior.x).abs() / ancho;
+                let dy = f32::from(destino.y - anterior.y).abs() / alto;
+                let distancia = dx.hypot(dy);
 
-                //  Cuanto más lejos, más rápido: así un salto de línea no se
-                //  arrastra y un movimiento de una letra se ve suave.
-                let lejos = (dx + dy) / f32::from(line_height).max(1.0);
-                let paso = (0.35 + lejos * 0.06).min(0.75);
-                let lerp = |a: Pixels, b: Pixels| a + (b - a) * paso;
-
-                let nuevo = if salto_enorme {
-                    destino
-                } else {
-                    point(lerp(anterior.x, destino.x), lerp(anterior.y, destino.y))
-                };
-                //  A menos de medio píxel ya está en su sitio: dejar de pedir
-                //  fotogramas es lo que evita el bucle infinito de repintado.
-                let quieto = f32::from(nuevo.x - destino.x).abs() < 0.5
-                    && f32::from(nuevo.y - destino.y).abs() < 0.5;
-                let nuevo = if quieto { destino } else { nuevo };
-
-                //  La estela son los sitios por donde acaba de pasar. Se
-                //  guarda aquí y no se calcula al pintar porque lo que se
-                //  quiere enseñar es el camino real, con su aceleración.
-                if vista.estela_largo > 0 {
-                    if quieto {
-                        //  Parado, la estela se recoge sola: un fantasma
-                        //  menos por fotograma hasta vaciarse.
-                        //
-                        //  Ojo a lo que había antes aquí, que parecía lo
-                        //  mismo: apuntar TAMBIÉN la posición quieta y quitar
-                        //  el más viejo. Eso deja la lista clavada en su
-                        //  largo, con todos los fantasmas amontonados bajo el
-                        //  cursor —invisibles, pero ahí—, y `cursor_moviendose`
-                        //  no vuelve a ser falso jamás: la terminal se queda
-                        //  pidiendo fotogramas para siempre con la pantalla
-                        //  parada. Con la comprobación delante, que quieto y
-                        //  sin estela es el caso de siempre y sin ella se
-                        //  caía al abrir.
-                        if !vista.cursor_estela.is_empty() {
-                            vista.cursor_estela.remove(0);
-                        }
-                    } else {
-                        vista.cursor_estela.push(anterior);
-                        let sobran = vista
-                            .cursor_estela
-                            .len()
-                            .saturating_sub(vista.estela_largo as usize);
-                        if sobran > 0 {
-                            vista.cursor_estela.drain(..sobran);
-                        }
+                //  Kitty's default threshold is two cells: ordinary typing
+                //  does not create a cloudy trail, but jumps and page moves
+                //  remain easy to follow.
+                if vista.estela_largo > 0 && distancia >= 2.0 {
+                    let intensidad = (distancia / 24.0).clamp(0.0, 1.0);
+                    let lifetime = Duration::from_secs_f32(0.1 + intensidad * 0.3);
+                    vista.cursor_estela.push(CursorTrailGhost {
+                        position: anterior,
+                        started: Instant::now(),
+                        lifetime,
+                    });
+                    let sobran = vista
+                        .cursor_estela
+                        .len()
+                        .saturating_sub(vista.estela_largo as usize);
+                    if sobran > 0 {
+                        vista.cursor_estela.drain(..sobran);
                     }
                 }
 
-                vista.cursor_pintado = Some(nuevo);
-                vista.cursor_moviendose = !quieto || !vista.cursor_estela.is_empty();
-                nuevo
+                //  Never interpolate the actual caret: doing so makes the
+                //  cursor visibly lag behind the bytes just typed.
+                vista.cursor_pintado = Some(destino);
+                vista.cursor_moviendose = !vista.cursor_estela.is_empty();
+                destino
             });
 
             Some(fill(
@@ -2748,22 +2732,34 @@ impl Element for TerminalTextElement {
             ))
         });
 
-        //  Los fantasmas de la estela, del más viejo al más nuevo y cada vez
-        //  más presentes. Van antes que el cursor para que él quede encima.
+        //  Remove expired ghosts before painting. The host keeps requesting
+        //  frames while this list is non-empty, so the fade is smooth.
+        let ahora = Instant::now();
+        self.view.update(cx, |vista, _| {
+            vista
+                .cursor_estela
+                .retain(|fantasma| ahora.duration_since(fantasma.started) < fantasma.lifetime);
+            vista.cursor_moviendose = !vista.cursor_estela.is_empty();
+        });
+
+        //  Fading after-images, from oldest to newest, painted below the
+        //  actual cursor.
         let estela: Vec<PaintQuad> = {
             let vista = self.view.read(cx);
             let color = cursor_color_for_background(vista.session.default_background());
-            let total = vista.cursor_estela.len().max(1) as f32;
             vista
                 .cursor_estela
                 .iter()
-                .enumerate()
-                .map(|(i, p)| {
-                    let fuerza = (i as f32 + 1.0) / total;
-                    fill(
-                        Bounds::new(*p, size(px(2.0), line_height)),
-                        color.opacity(fuerza * 0.35),
-                    )
+                .filter_map(|fantasma| {
+                    let progreso = ahora.duration_since(fantasma.started).as_secs_f32()
+                        / fantasma.lifetime.as_secs_f32();
+                    let fuerza = (1.0 - progreso.clamp(0.0, 1.0)).powi(2) * 0.35;
+                    (fuerza > 0.0).then(|| {
+                        fill(
+                            Bounds::new(fantasma.position, size(px(2.0), line_height)),
+                            color.opacity(fuerza),
+                        )
+                    })
                 })
                 .collect()
         };

@@ -16,6 +16,7 @@ Deliver a maintainable Rust workspace that bootstraps an embedded terminal contr
 
 ## Agent Work (Compacted)
 
+- [x] Make cursor movement Kitty-like: snap the caret to typed input and fade short trails only for larger jumps.
 - [x] Fix fish startup delay in embedded k4term sessions by disabling unsupported terminal capability probes.
 
 - [x] M0: Workspace Bootstrap (Ghostty submodule, workspace layout, scripts, docs)
