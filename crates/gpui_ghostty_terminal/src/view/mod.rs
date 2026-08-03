@@ -2684,8 +2684,18 @@ impl Element for TerminalTextElement {
             let y = bounds.top() + line_height * (row.saturating_sub(1)) as f32;
             let row_index = row.saturating_sub(1) as usize;
             let line = shaped_lines.get(row_index)?;
-            let byte_index = byte_index_for_column_in_line(line.text.as_str(), col);
-            let x = bounds.left() + line.x_for_index(byte_index.min(line.text.len()));
+            // The VT cursor is a grid coordinate, not a byte offset into the
+            // visible text. Interactive CLIs commonly keep trailing spaces
+            // after the last word, while viewport dumps trim those spaces;
+            // using `line.x_for_index` in that case pins the caret to the last
+            // glyph. Use the cell grid whenever metrics are available so a
+            // cursor after a space is rendered in the correct column.
+            let x = cell_width
+                .map(|width| bounds.left() + width * col.saturating_sub(1) as f32)
+                .unwrap_or_else(|| {
+                    let byte_index = byte_index_for_column_in_line(line.text.as_str(), col);
+                    bounds.left() + line.x_for_index(byte_index.min(line.text.len()))
+                });
 
             //  Kitty's trail is an after-image: the real cursor follows the
             //  terminal immediately, while only large jumps leave a fading

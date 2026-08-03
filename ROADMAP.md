@@ -118,6 +118,7 @@ Deliver a maintainable Rust workspace that bootstraps an embedded terminal contr
 - [x] Fix Tab focus escape: TerminalView should consume Tab/Shift-Tab when focused.
 - [x] Fix alt-screen exit stale viewport: map terminal dirty.clear to dirty rows.
 - [x] Profile `pty_terminal` performance with Instruments and document bottlenecks (notes: `docs/perf_instruments.md`).
+- [x] Keep the cursor aligned to terminal grid columns after trailing spaces in interactive CLIs.
 
 ## Future Work
 
