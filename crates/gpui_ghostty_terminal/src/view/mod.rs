@@ -367,14 +367,14 @@ const AJUSTES: [Ajuste; 4] = [
     Ajuste {
         clave: "tamaño",
         nombre: "Tamaño de letra",
-        ayuda: "de esta ventana",
+        ayuda: "De esta ventana",
         valores: &[("11", "11"), ("13", "13"), ("15", "15"), ("18", "18")],
         por_defecto: "13",
     },
     Ajuste {
         clave: "opacidad",
         nombre: "Cristal",
-        ayuda: "cuánto se ve del fondo por detrás",
+        ayuda: "Cuánto se ve del fondo por detrás",
         valores: &[
             ("1", "opaca"),
             ("0.94", "suave"),
@@ -386,14 +386,14 @@ const AJUSTES: [Ajuste; 4] = [
     Ajuste {
         clave: "estela",
         nombre: "Estela del cursor",
-        ayuda: "deja rastro al moverse",
+        ayuda: "Deja rastro al moverse",
         valores: &[("si", "sí"), ("no", "no")],
         por_defecto: "si",
     },
     Ajuste {
         clave: "tranquilo",
         nombre: "Modo tranquilo",
-        ayuda: "atenúa lo anterior al último mandato",
+        ayuda: "Atenúa lo anterior al último mandato",
         valores: &[("no", "no"), ("si", "sí")],
         por_defecto: "no",
     },
@@ -403,21 +403,21 @@ const AJUSTES: [Ajuste; 4] = [
 //  primeros van a `~/.ssh/config` —los entiende ssh y los aprovechan scp, git
 //  y todo lo demás—; los dos últimos son nuestros.
 const CAMPOS: [(&str, &str); 11] = [
-    ("Nombre", "como lo vas a llamar"),
-    ("Máquina", "dominio o IP"),
-    ("Usuario", "vacío = el tuyo"),
+    ("Nombre", "Como lo vas a llamar"),
+    ("Máquina", "Dominio o IP"),
+    ("Usuario", "Vacío = el tuyo"),
     //  Justo debajo del usuario porque son las dos mitades de lo mismo. Se
     //  guarda aparte de todo lo demás —fichero propio con 600— y aquí se
     //  enseña con puntos salvo que pidas verla (ctrl+O).
-    ("Contraseña", "si entra con contraseña en vez de con clave"),
-    ("Puerto", "vacío = 22"),
-    ("Clave", "ruta de la privada, si no la de siempre"),
-    ("Salto", "pasar por otro servidor (ProxyJump)"),
-    ("Etiquetas", "separadas por espacios, para buscar"),
-    ("Al entrar", "un mandato que se teclea al conectar"),
+    ("Contraseña", "Si entra con contraseña en vez de con clave"),
+    ("Puerto", "Vacío = 22"),
+    ("Clave", "Ruta de la privada, si no la de siempre"),
+    ("Salto", "Pasar por otro servidor (ProxyJump)"),
+    ("Etiquetas", "Separadas por espacios, para buscar"),
+    ("Al entrar", "Un mandato que se teclea al conectar"),
     (
         "Color",
-        "rojo, ámbar, verde, azul, morado — para saber dónde estás",
+        "Rojo, ámbar, verde, azul, morado — para saber dónde estás",
     ),
     (
         "Túneles",
@@ -4172,9 +4172,9 @@ impl Render for TerminalView {
                             .px_1()
                             .pb_1()
                             .child(div().text_color(apagado).child(if f.original.is_empty() {
-                                "servidor nuevo".to_string()
+                                "Servidor nuevo".to_string()
                             } else {
-                                format!("editar {}", f.original)
+                                format!("Editar {}", f.original)
                             }))
                             .child(
                                 div()
@@ -4263,8 +4263,8 @@ impl Render for TerminalView {
                             .flex()
                             .flex_col()
                             .text_color(hsla(0., 0., 0.35, 1.0))
-                            .child("intro guarda · esc cancela · ↑↓ cambia de campo")
-                            .child("ctrl+O ver la contraseña · ctrl+F favorito"),
+                            .child("Intro guarda · esc cancela · ↑↓ cambia de campo")
+                            .child("Ctrl+O ver la contraseña · ctrl+F favorito"),
                     );
 
                     return caja;
@@ -4281,7 +4281,7 @@ impl Render for TerminalView {
                         .gap_2()
                         .px_1()
                         .pb_1()
-                        .child(div().flex_none().text_color(apagado).child("servidor"))
+                        .child(div().flex_none().text_color(apagado).child("Servidor"))
                         .child(
                             div()
                                 .flex_1()
@@ -4297,9 +4297,9 @@ impl Render for TerminalView {
                     //  ninguno todavía.
                     caja = caja.child(div().px_2().py_1().text_color(apagado).child(
                         if s.todos.is_empty() {
-                            "no hay servidores en ~/.ssh/config"
+                            "No hay servidores en ~/.ssh/config"
                         } else {
-                            "ninguno con ese nombre"
+                            "Ninguno con ese nombre"
                         },
                     ));
                 }
@@ -4377,7 +4377,7 @@ impl Render for TerminalView {
                                     .truncate()
                                     .text_color(gpui::white())
                                     .child(if servidor.rapido {
-                                        format!("conectar a {}", servidor.host)
+                                        format!("Conectar a {}", servidor.host)
                                     } else {
                                         servidor.alias.clone()
                                     }),
@@ -4411,8 +4411,8 @@ impl Render for TerminalView {
                         .flex()
                         .flex_col()
                         .text_color(hsla(0., 0., 0.35, 1.0))
-                        .child("intro o clic conecta · ctrl+S guarda o edita")
-                        .child("ctrl+G agentes · ctrl+F favorito · supr borra"),
+                        .child("Intro o clic conecta · ctrl+S guarda o edita")
+                        .child("Ctrl+G agentes · ctrl+F favorito · supr borra"),
                 )
             }))
             //  ── los ajustes de la terminal ────────────────────────
@@ -4442,7 +4442,7 @@ impl Render for TerminalView {
                             .gap_2()
                             .px_1()
                             .pb_1()
-                            .child(div().text_color(gpui::white()).child("ajustes"))
+                            .child(div().text_color(gpui::white()).child("Ajustes"))
                             .child(div().text_color(apagado).child("de esta terminal")),
                     );
 
@@ -4535,7 +4535,7 @@ impl Render for TerminalView {
                             .hover(|d| d.bg(hsla(0., 0., 0.16, 1.0)))
                             .on_mouse_down(MouseButton::Left, |_, _, _| crate::abrir_ajustes())
                             .text_color(apagado)
-                            .child("los ajustes de k4 —el tema, la isla, los plugins—"),
+                            .child("Los ajustes de k4 —el tema, la isla, los plugins—"),
                     );
                 }
 
@@ -4547,7 +4547,7 @@ impl Render for TerminalView {
                         .flex_col()
                         .text_color(hsla(0., 0., 0.35, 1.0))
                         .child("↑↓ elige · ←→ o clic cambia · esc cierra")
-                        .child("se guarda solo en ~/.config/k4term/k4term.conf"),
+                        .child("Se guarda solo en ~/.config/k4term/k4term.conf"),
                 )
             }))
             .children(self.busqueda.as_ref().map(|b| {
@@ -4575,7 +4575,7 @@ impl Render for TerminalView {
                     .bg(hsla(0., 0., 0.11, 0.96))
                     .border_1()
                     .border_color(hsla(0., 0., 1.0, 0.08))
-                    .child(div().text_color(hsla(0., 0., 0.56, 1.0)).child("buscar"))
+                    .child(div().text_color(hsla(0., 0., 0.56, 1.0)).child("Buscar"))
                     .child(div().text_color(gpui::white()).child(b.patron.clone()))
                     .child(
                         div()
