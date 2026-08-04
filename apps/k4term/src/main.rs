@@ -168,6 +168,28 @@ fn main() {
     Application::new().run(move |cx: &mut App| {
         let ajustes = Ajustes::leer();
 
+        //  El adiós, en el acto.
+        //
+        //  `barra::limpiar` se decía desde dos sitios y los dos cuelgan de que
+        //  muera la SHELL: el hilo que espera al hijo y el final del hilo
+        //  lector. Cerrar la ventana no pasa por ninguno —GPUI apaga y el
+        //  proceso se va ya; la shell se entera después, por el SIGHUP que le
+        //  llega al cerrarse el maestro del PTY, y para entonces no queda
+        //  nadie que mande el IPC—, así que la píldora del mandato que
+        //  estuviera corriendo se quedaba en la isla hasta que el vigilante de
+        //  la barra la recogía cinco segundos más tarde.
+        //
+        //  Decirlo dos veces no cuesta nada: quitar una píldora que ya no está
+        //  es una orden que no hace nada. Y esto NO cubre la mudanza a la
+        //  isla, que sale por `std::process::exit` y se salta los cierres de
+        //  GPUI: allí la sesión sigue viva del otro lado y es la barra quien
+        //  lleva la cuenta.
+        cx.on_app_quit(|_| {
+            barra::limpiar(std::process::id());
+            async {}
+        })
+        .detach();
+
         cx.bind_keys([
             KeyBinding::new("ctrl-shift-a", SelectAll, None),
             KeyBinding::new("ctrl-shift-c", Copy, None),
