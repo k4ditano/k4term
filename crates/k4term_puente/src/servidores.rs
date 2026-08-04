@@ -563,6 +563,10 @@ pub fn bloque_agentes(servidor: &Servidor) -> String {
         ruta_clave_agentes().display()
     ));
     texto.push_str("    IdentitiesOnly yes\n");
+    //  Y que no pregunte NADA. Esta puerta es para lo que no tiene a nadie
+    //  delante: si la clave no vale, lo que se quiere es un error legible al
+    //  instante, no un agente esperando para siempre un prompt que no ve.
+    texto.push_str("    BatchMode yes\n");
     texto.push_str("    StrictHostKeyChecking accept-new\n");
     texto
 }
@@ -801,6 +805,8 @@ Host trabajo   trabajo.corto
         //  Sin esto ssh ofrecería también tus claves y el agente entraría
         //  como tú, que es justo lo que esta puerta viene a evitar.
         assert!(bloque.contains("IdentitiesOnly yes"));
+        //  Nada de preguntas: si la clave no vale, error y a otra cosa.
+        assert!(bloque.contains("BatchMode yes"));
         //  Y la contraseña no pinta nada aquí: esta puerta va con clave.
         assert!(!bloque.contains("secreta"));
     }
