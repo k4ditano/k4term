@@ -150,6 +150,29 @@ This implementation includes common terminal behaviors needed by modern TUIs:
 
 The examples set `TERM=xterm-256color` and `COLORTERM=truecolor` to help apps enable richer output.
 
+## Saved servers and passwords
+
+`ctrl+shift+S` opens the server list, read from `~/.ssh/config` (plus k4's own
+extras in `~/.config/k4term/hosts.json`: favourites, tags, tint, tunnels).
+
+A server may also carry a **password**, for machines that ask for one instead of
+using a key. Two things are worth knowing before you use it:
+
+- It is stored in `~/.config/k4term/claves.json` with `600` permissions **in
+  clear text** — the same deal as an SSH key without a passphrase: anyone who
+  has your user account has it. It never goes into `~/.ssh/config` nor into
+  `hosts.json`, because those get opened, shown and copied around without a
+  second thought. If a working Secret Service ever shows up on the machine,
+  `servidores::ruta_claves` is the single place to change.
+- It is delivered by the terminal itself: k4term watches the PTY and types it
+  when the other side asks. No `sshpass`, no extra binary — and, for the same
+  reason, it only works inside k4term (the window or the island session), not
+  in someone else's terminal.
+
+Saved hosts get `StrictHostKeyChecking accept-new` in their block, so the
+first-time fingerprint question does not interrupt the connection. A key that
+*changes* still stops it, which is the case that matters.
+
 ## License
 
 This project is licensed under the Apache License, Version 2.0. See `LICENSE`.

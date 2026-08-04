@@ -330,6 +330,12 @@ struct Config {
     //  lo que garantiza que la isla y la ventana usan la misma.
     fuente: String,
     tamano: f32,
+    //  Qué sabe hacer esta versión. Hoy solo una cosa, pero la lista existe
+    //  para que la barra pueda ofrecer algo o callarse SEGÚN lo que hay
+    //  enfrente, en vez de mandar una orden que un binario viejo se traga en
+    //  silencio: la contraseña no se tecleaba y no había forma de saber por
+    //  qué.
+    claves: bool,
 }
 
 //  Dónde está la sesión ahora mismo. Se le pregunta al kernel por el
@@ -754,6 +760,7 @@ fn decir_config(salida: &std::io::Stdout, ajustes: &k4term_puente::Ajustes) {
         estela: ajustes.estela,
         fuente: ajustes.fuente.clone(),
         tamano: ajustes.tamano,
+        claves: true,
     }) {
         let mut s = salida.lock();
         let _ = writeln!(s, "{}", json);
