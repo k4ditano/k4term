@@ -48,6 +48,7 @@ use std::io::{BufRead, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -151,6 +152,11 @@ enum Orden {
     //  El color del sitio donde estás. Vacío lo quita.
     #[serde(rename = "tinte")]
     Tinte { color: String },
+    //  La contraseña que hay que teclear si el otro lado la pide. Se manda al
+    //  conectar y se olvida sola: no se guarda aquí ni se enseña nunca, y sin
+    //  petición no se escribe jamás.
+    #[serde(rename = "clave")]
+    Clave { valor: String },
     //  Plegar o desplegar la salida de un mandato, por la fila del historial
     //  donde empieza.
     #[serde(rename = "plegar")]
@@ -1293,6 +1299,14 @@ fn main() {
         }
     };
 
+    //  Lo que hay que contestar si preguntan: la contraseña de la conexión que
+    //  se acaba de lanzar, y desde cuándo se está atento. Lo pone la barra al
+    //  conectar y lo consume el lector; media hora después de nada ya no vale.
+    let espera: Arc<Mutex<Option<(String, Instant)>>> = Arc::new(Mutex::new(None));
+
+    let espera_lector = Arc::clone(&espera);
+    let espera_ordenes = Arc::clone(&espera);
+
     let mut lector = maestro.lector();
     let mut escritor = maestro.escritor();
     let fd_maestro = maestro.fd();
@@ -1353,6 +1367,7 @@ fn main() {
     //  API C de ghostty no los expone y no hace falta que lo haga.
     {
         let tx: Sender<Recado> = tx.clone();
+        let al_pty_lector = al_pty.clone();
         thread::spawn(move || {
             let avisos = trabajos::notificador_con(|parte| match parte {
                 trabajos::Parte::Empezado { mandato, segundos } => decir(&Trabajo {
@@ -1389,6 +1404,28 @@ fn main() {
                 //  después sitúa el mandato donde acabó la ráfaga: con un
                 //  `seq 1 40`, que sale de una tacada, la marca caía tres
                 //  líneas por debajo de donde de verdad empezó.
+                //  ¿Están pidiendo la contraseña, o la huella de la máquina?
+                //
+                //  Se mira aquí, en crudo, antes de que el trozo se parta y se
+                //  pinte: es lo mismo que hace la ventana, con la misma lista
+                //  de lo que cuenta como pregunta, y por eso vive en el puente.
+                {
+                    let mut guardia = espera_lector.lock().unwrap();
+                    if let Some((clave, desde)) = guardia.clone() {
+                        let texto = String::from_utf8_lossy(&buf[..n]);
+                        if desde.elapsed() > Duration::from_secs(30) {
+                            *guardia = None;
+                        } else if k4term_puente::servidores::es_peticion_de_clave(&texto) {
+                            *guardia = None;
+                            let _ = al_pty_lector.send(format!("{clave}\r").into_bytes());
+                        } else if k4term_puente::servidores::es_pregunta_de_huella(&texto) {
+                            //  El «yes» no consume la espera: después de la
+                            //  huella viene la contraseña.
+                            let _ = al_pty_lector.send(b"yes\r".to_vec());
+                        }
+                    }
+                }
+
                 let sucesos = escaner.tragar_con_sitio(&buf[..n]);
                 let mut cortado = 0usize;
                 let mut roto = false;
@@ -1572,6 +1609,10 @@ fn main() {
                 }
                 Orden::Tinte { color } => {
                     let _ = tx.send(Recado::Tinte { color });
+                }
+                Orden::Clave { valor } => {
+                    *espera_ordenes.lock().unwrap() =
+                        (!valor.is_empty()).then(|| (valor, Instant::now()));
                 }
                 Orden::Plegar { fila } => {
                     let _ = tx.send(Recado::Plegar { fila });
