@@ -3964,6 +3964,11 @@ impl Render for TerminalView {
                 let radio = px(self.radio.max(10.));
                 let apagado = hsla(0., 0., 0.45, 1.0);
 
+                //  `overflow_hidden` en la caja: es el cinturón. Lo de dentro
+                //  se corta con puntos suspensivos —eso es lo que se quiere
+                //  ver—, pero si algo se escapa, se queda dentro igualmente.
+                //  Sin esto, un nombre largo se salía por la derecha del
+                //  recuadro y se leía por encima de la terminal.
                 let mut caja = div()
                     .absolute()
                     .top_8()
@@ -3972,6 +3977,7 @@ impl Render for TerminalView {
                     .ml(px(-260.))
                     .flex()
                     .flex_col()
+                    .overflow_hidden()
                     .gap_1()
                     .p_2()
                     .rounded(radio)
@@ -4032,13 +4038,26 @@ impl Render for TerminalView {
                                         .child(*nombre),
                                 )
                                 .child(if valor.is_empty() {
-                                    div().text_color(hsla(0., 0., 0.35, 1.0)).child(*ayuda)
+                                    div()
+                                        .flex_1()
+                                        .truncate()
+                                        .text_color(hsla(0., 0., 0.35, 1.0))
+                                        .child(*ayuda)
                                 } else if i == 3 && !f.ver_clave {
                                     div()
+                                        .flex_1()
+                                        .truncate()
                                         .text_color(gpui::white())
                                         .child("•".repeat(valor.chars().count()))
                                 } else {
-                                    div().text_color(gpui::white()).child(valor)
+                                    //  Por el final: en una ruta o un mandato
+                                    //  largo, lo que dice de qué va es el
+                                    //  principio.
+                                    div()
+                                        .flex_1()
+                                        .truncate()
+                                        .text_color(gpui::white())
+                                        .child(valor)
                                 }),
                         );
                     }
@@ -4047,10 +4066,11 @@ impl Render for TerminalView {
                         div()
                             .px_2()
                             .pt_1()
+                            .flex()
+                            .flex_col()
                             .text_color(hsla(0., 0., 0.35, 1.0))
-                            .child(
-                                "intro guarda · esc cancela · ↑↓ campo · ctrl+O ver la contraseña",
-                            ),
+                            .child("intro guarda · esc cancela · ↑↓ cambia de campo")
+                            .child("ctrl+O ver la contraseña · ctrl+F favorito"),
                     );
 
                     return caja;
@@ -4062,11 +4082,19 @@ impl Render for TerminalView {
                 caja = caja.child(
                     div()
                         .flex()
+                        .w_full()
+                        .overflow_hidden()
                         .gap_2()
                         .px_1()
                         .pb_1()
-                        .child(div().text_color(apagado).child("servidor"))
-                        .child(div().text_color(gpui::white()).child(s.patron.clone())),
+                        .child(div().flex_none().text_color(apagado).child("servidor"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .truncate()
+                                .text_color(gpui::white())
+                                .child(s.patron.clone()),
+                        ),
                 );
 
                 if filtrados.is_empty() {
@@ -4089,6 +4117,8 @@ impl Render for TerminalView {
                     caja = caja.child(
                         div()
                             .flex()
+                            .w_full()
+                            .overflow_hidden()
                             .items_center()
                             .gap_2()
                             .px_2()
@@ -4117,23 +4147,54 @@ impl Render for TerminalView {
                                     .text_color(hsla(0.33, 0.6, 0.55, 1.0))
                                     .child(if servidor.agentes { "⚙" } else { "" }),
                             )
-                            .child(div().text_color(gpui::white()).child(if servidor.rapido {
-                                format!("conectar a {}", servidor.host)
-                            } else {
-                                servidor.alias.clone()
-                            }))
-                            .child(div().text_color(apagado).child(servidor.detalle())),
+                            //  El nombre manda y el detalle cede: si no cabe
+                            //  todo, lo que se corta es a dónde va, no cómo se
+                            //  llama. Los dos con puntos suspensivos, que un
+                            //  nombre largo se salía del recuadro y se leía
+                            //  por encima de la terminal.
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .max_w(px(300.))
+                                    .truncate()
+                                    .text_color(gpui::white())
+                                    .child(if servidor.rapido {
+                                        format!("conectar a {}", servidor.host)
+                                    } else {
+                                        servidor.alias.clone()
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_color(apagado)
+                                    .child(servidor.detalle()),
+                            ),
                     );
                 }
 
                 //  Las teclas, en el pie y no en la fila: metidas al lado del
                 //  nombre se salían de la caja en cuanto el host era largo.
+                //  El pie, al ancho de la caja: sin `w_full` no tiene contra
+                //  qué partir la línea y se sale por la derecha en cuanto la
+                //  letra es un poco grande. Y las teclas en dos renglones
+                //  cortos antes que uno largo, que así caben siempre.
+                //  Las teclas en DOS renglones cortos y no en uno largo.
+                //
+                //  Partido a mano a propósito: una línea sola no parte por sí
+                //  misma —se queda de una y la caja la corta por la derecha—,
+                //  y con la letra un poco grande se comía «supr borra». Dos
+                //  renglones caben siempre y se leen igual de bien.
                 caja.child(
                     div()
                         .px_2()
                         .pt_1()
+                        .flex()
+                        .flex_col()
                         .text_color(hsla(0., 0., 0.35, 1.0))
-                        .child("intro conecta · ctrl+S guarda · ctrl+G agentes · supr borra"),
+                        .child("intro conecta · ctrl+S guarda o edita")
+                        .child("ctrl+G agentes · ctrl+F favorito · supr borra"),
                 )
             }))
             .children(self.busqueda.as_ref().map(|b| {
