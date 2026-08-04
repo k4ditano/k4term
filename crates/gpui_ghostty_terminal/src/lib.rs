@@ -41,6 +41,10 @@ pub struct Servidor {
     //  como se escriben en el formulario; quien las guarde ya las partirá.
     pub etiquetas: String,
     pub al_conectar: String,
+    //  La contraseña, para los servidores que van con ella. Se guarda aparte
+    //  —fichero propio con 600— y aquí viaja solo para poder escribirla en el
+    //  formulario y tecleársela a ssh cuando la pida.
+    pub contrasena: String,
     //  Un destino escrito al vuelo, todavía sin guardar: se pinta distinto y
     //  es lo único que se puede guardar.
     pub rapido: bool,
@@ -73,6 +77,7 @@ type PorAlias = dyn Fn(&str) + Send + Sync;
 type PorServidor = dyn Fn(&Servidor) + Send + Sync;
 type SinNada = dyn Fn() + Send + Sync;
 type ColorPorNombre = dyn Fn(&str) -> Option<(u8, u8, u8)> + Send + Sync;
+type MiraTexto = dyn Fn(&str) -> bool + Send + Sync;
 
 pub struct GestorServidores {
     pub listar: Box<Listar>,
@@ -88,6 +93,11 @@ pub struct GestorServidores {
     //  De nombre de color a color. Lo resuelve el anfitrión porque la paleta
     //  de la casa es suya: aquí solo se sabe mezclar.
     pub color: Box<ColorPorNombre>,
+    //  Si un trozo de lo que llega del otro lado es una petición de
+    //  contraseña. Lo decide el anfitrión por lo mismo que todo lo demás: la
+    //  vista lee el PTY, pero qué cuenta como «password:» es cosa de quien
+    //  guarda las contraseñas, y la isla usa la misma lista.
+    pub pide_clave: Box<MiraTexto>,
 }
 
 static GESTOR: std::sync::OnceLock<GestorServidores> = std::sync::OnceLock::new();

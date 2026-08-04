@@ -216,6 +216,7 @@ fn main() {
                 favorito: s.favorito,
                 etiquetas: s.etiquetas.join(" "),
                 al_conectar: s.al_conectar,
+                contrasena: s.contrasena,
                 rapido: false,
             }
         }
@@ -234,6 +235,7 @@ fn main() {
                 ultimo: 0,
                 etiquetas: s.etiquetas.split_whitespace().map(str::to_string).collect(),
                 al_conectar: s.al_conectar.clone(),
+                contrasena: s.contrasena.clone(),
             }
         }
 
@@ -260,6 +262,7 @@ fn main() {
             conectado: Box::new(|destino| barra::conectado(std::process::id(), destino)),
             desconectado: Box::new(|| barra::desconectado(std::process::id())),
             color: Box::new(servidores::color_del_tinte),
+            pide_clave: Box::new(servidores::es_peticion_de_clave),
         });
 
         //  El botón de ajustes solo existe si hay barra que los enseñe.

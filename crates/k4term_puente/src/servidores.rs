@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Servidor {
     pub alias: String,
     pub host: String,
@@ -37,6 +37,10 @@ pub struct Servidor {
     pub al_conectar: String,
     pub tinte: String,
     pub tuneles: String,
+    //  La contraseña, si este servidor va con contraseña en vez de con clave.
+    //  No se escribe en `~/.ssh/config` ni en `hosts.json`: vive en su propio
+    //  fichero con 600, ver `ruta_claves`.
+    pub contrasena: String,
 }
 
 impl Servidor {
@@ -84,6 +88,80 @@ pub fn ruta_extras() -> PathBuf {
     casa().join(".config/k4term/hosts.json")
 }
 
+//  ── las contraseñas ───────────────────────────────────────────────
+//
+//  En su propio fichero y con 600, nunca en `~/.ssh/config` ni en
+//  `hosts.json`: esos dos se abren, se enseñan y se copian sin pensarlo, y
+//  una contraseña no puede viajar en algo que se trata así.
+//
+//  Van en claro, y hay que decirlo sin adornos: el trato es el mismo que el
+//  de una clave privada sin frase de paso —quien tenga tu usuario, las
+//  tiene—. Se guarda aquí porque en este equipo no hay ningún servicio de
+//  secretos funcionando: `secret-tool` está, pero el de KDE no arranca.
+//  Cuando lo haya, este es el único sitio que hay que cambiar.
+//  ¿Está el otro lado pidiendo la contraseña?
+//
+//  Se mira en minúsculas y solo mientras hay una esperando: fuera de esa
+//  ventana esto no se enciende jamás. El «assword» sin la primera letra vale
+//  para «Password» y para «password» con una sola comparación, y las otras
+//  dos formas son las de un servidor en castellano.
+pub fn es_peticion_de_clave(texto: &str) -> bool {
+    let t = texto.to_lowercase();
+    t.contains("assword:") || t.contains("contrasena:") || t.contains("contraseña:")
+}
+
+pub fn ruta_claves() -> PathBuf {
+    casa().join(".config/k4term/claves.json")
+}
+
+fn claves() -> HashMap<String, String> {
+    std::fs::read_to_string(ruta_claves())
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+pub fn leer_clave(alias: &str) -> String {
+    claves().get(alias).cloned().unwrap_or_default()
+}
+
+//  Una contraseña vacía BORRA la que hubiera: es la única forma de quitarla
+//  desde el formulario, y dejarla ahí porque el campo se vació sería justo
+//  lo contrario de lo que se ha pedido.
+pub fn guardar_clave(alias: &str, clave: &str) {
+    let mut todas = claves();
+    if clave.is_empty() {
+        todas.remove(alias);
+    } else {
+        todas.insert(alias.to_string(), clave.to_string());
+    }
+    escribir_claves(&todas);
+}
+
+pub fn borrar_clave(alias: &str) {
+    let mut todas = claves();
+    if todas.remove(alias).is_some() {
+        escribir_claves(&todas);
+    }
+}
+
+fn escribir_claves(todas: &HashMap<String, String>) {
+    let ruta = ruta_claves();
+    if let Some(padre) = ruta.parent() {
+        let _ = std::fs::create_dir_all(padre);
+        permisos(padre, 0o700);
+    }
+    //  Si se quedan sin ninguna, fuera el fichero: menos sitios donde mirar.
+    if todas.is_empty() {
+        let _ = std::fs::remove_file(&ruta);
+        return;
+    }
+    if let Ok(texto) = serde_json::to_string_pretty(todas) {
+        let _ = std::fs::write(&ruta, texto);
+        permisos(&ruta, 0o600);
+    }
+}
+
 //  Todos los servidores, ordenados como se usan: primero los favoritos,
 //  después por cuándo entraste —lo de ayer suele ser lo de hoy— y al final
 //  por nombre.
@@ -93,6 +171,7 @@ pub fn leer() -> Vec<Servidor> {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
+    let guardadas = claves();
 
     let mut salida: Vec<Servidor> = Vec::new();
 
@@ -131,6 +210,9 @@ pub fn leer() -> Vec<Servidor> {
                 ultimo: extra.map(|e| e.ultimo).unwrap_or(0),
                 etiquetas: extra.map(|e| e.etiquetas.clone()).unwrap_or_default(),
                 al_conectar: extra.map(|e| e.al_conectar.clone()).unwrap_or_default(),
+                //  La contraseña no está en el `ssh_config` ni en los extras:
+                //  se busca en su fichero, por alias.
+                contrasena: guardadas.get(primero).cloned().unwrap_or_default(),
                 tinte: extra.map(|e| e.tinte.clone()).unwrap_or_default(),
                 tuneles: extra.map(|e| e.tuneles.clone()).unwrap_or_default(),
             });
@@ -231,6 +313,9 @@ pub fn como_destino(texto: &str) -> Option<Servidor> {
         puerto,
         clave: String::new(),
         salto: String::new(),
+        //  Un destino escrito al vuelo no está guardado, así que tampoco
+        //  tiene contraseña que buscarle.
+        contrasena: String::new(),
         favorito: false,
         ultimo: 0,
         etiquetas: Vec::new(),
@@ -261,7 +346,21 @@ pub fn guardar(servidor: &Servidor) -> Result<(), String> {
         texto.push('\n');
     }
 
-    texto.push_str(&format!("\nHost {}\n", servidor.alias));
+    texto.push_str(&bloque_ssh(servidor));
+
+    std::fs::write(&ruta, texto).map_err(|e| e.to_string())?;
+    guardar_extras(servidor);
+    guardar_clave(&servidor.alias, &servidor.contrasena);
+    //  No lleva secretos, pero dice a qué máquinas entras y con qué usuario.
+    permisos(&ruta, 0o600);
+    Ok(())
+}
+
+//  El bloque que se escribe en `~/.ssh/config`, aparte para poder ejercerlo
+//  sin tocar el `~/.ssh` de nadie. Aquí va lo que ssh entiende y NADA más: la
+//  contraseña no aparece, y esa es la línea que no se cruza.
+pub fn bloque_ssh(servidor: &Servidor) -> String {
+    let mut texto = format!("\nHost {}\n", servidor.alias);
     texto.push_str(&format!("    HostName {}\n", servidor.host));
     for (clave, valor) in [
         ("User", &servidor.usuario),
@@ -273,12 +372,7 @@ pub fn guardar(servidor: &Servidor) -> Result<(), String> {
             texto.push_str(&format!("    {clave} {valor}\n"));
         }
     }
-
-    std::fs::write(&ruta, texto).map_err(|e| e.to_string())?;
-    guardar_extras(servidor);
-    //  No lleva secretos, pero dice a qué máquinas entras y con qué usuario.
-    permisos(&ruta, 0o600);
-    Ok(())
+    texto
 }
 
 //  Y borrarlo: desde su `Host` hasta el siguiente (o el final). Por líneas y
@@ -291,6 +385,9 @@ pub fn borrar(alias: &str) {
     };
     let _ = std::fs::write(&ruta, sin_bloque(&texto, alias));
     quitar_extra(alias);
+    //  Y su contraseña: dejarla suelta sería guardar el secreto de una máquina
+    //  a la que ya no vas.
+    borrar_clave(alias);
 }
 
 //  El fichero sin el bloque de ese host: desde su `Host` hasta el siguiente
@@ -525,5 +622,41 @@ Host trabajo   trabajo.corto
         }
 
         assert_eq!(vistos, vec!["casa", "trabajo"]);
+    }
+
+    //  ── las contraseñas ───────────────────────────────────────────
+    //
+    //  Lo que se comprueba no es que se guarden, que eso es un HashMap: es
+    //  que NO acaben donde no deben. Un secreto que se cuela en el fichero
+    //  que todo el mundo abre no avisa de nada.
+    //  Y que la contraseña NO se cuele en los ficheros que se abren y se
+    //  copian sin pensar. Es lo único que de verdad importa comprobar aquí:
+    //  guardarla es un mapa, no perderla de vista es el trabajo.
+    #[test]
+    fn la_contrasena_no_toca_el_ssh_config() {
+        let bloque = bloque_ssh(&Servidor {
+            alias: "casa".into(),
+            host: "192.168.1.10".into(),
+            usuario: "abel".into(),
+            contrasena: "secreta123".into(),
+            ..Default::default()
+        });
+        assert!(bloque.contains("HostName 192.168.1.10"));
+        assert!(bloque.contains("User abel"));
+        assert!(
+            !bloque.contains("secreta123"),
+            "la contraseña se ha escrito en el ssh_config"
+        );
+    }
+
+    #[test]
+    fn piden_prompt_de_contrasena() {
+        //  Vale para las tres formas que se ven de verdad.
+        for texto in ["abel@lento's password: ", "Password: ", "Contraseña: "] {
+            assert!(es_peticion_de_clave(texto), "no reconoce «{texto}»");
+        }
+        for texto in ["Last login: Mon", "password saved", ""] {
+            assert!(!es_peticion_de_clave(texto), "reconoce de más «{texto}»");
+        }
     }
 }

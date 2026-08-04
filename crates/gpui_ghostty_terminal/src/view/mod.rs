@@ -289,6 +289,8 @@ pub struct TerminalView {
     //  la ventana, a veces solo llega el segundo. Se atienden los dos y se
     //  descarta el repetido, que es lo único que sobra.
     ultimo_tecleado: Option<(String, Instant)>,
+    //  Una contraseña esperando a que ssh la pida, y desde cuándo.
+    clave_pendiente: Option<(String, Instant)>,
     //  Hasta cuándo dura el destello de la campana.
     campana_hasta: Option<std::time::Instant>,
     //  Los mandatos que han pasado por aquí, en coordenadas del historial.
@@ -342,10 +344,14 @@ struct Servidores {
 //  Los campos de un servidor, en el orden en que se rellenan. Los cinco
 //  primeros van a `~/.ssh/config` —los entiende ssh y los aprovechan scp, git
 //  y todo lo demás—; los dos últimos son nuestros.
-const CAMPOS: [(&str, &str); 10] = [
+const CAMPOS: [(&str, &str); 11] = [
     ("Nombre", "como lo vas a llamar"),
     ("Máquina", "dominio o IP"),
     ("Usuario", "vacío = el tuyo"),
+    //  Justo debajo del usuario porque son las dos mitades de lo mismo. Se
+    //  guarda aparte de todo lo demás —fichero propio con 600— y aquí se
+    //  enseña con puntos salvo que pidas verla (ctrl+O).
+    ("Contraseña", "si entra con contraseña en vez de con clave"),
     ("Puerto", "vacío = 22"),
     ("Clave", "ruta de la privada, si no la de siempre"),
     ("Salto", "pasar por otro servidor (ProxyJump)"),
@@ -362,9 +368,13 @@ const CAMPOS: [(&str, &str); 10] = [
 ];
 
 struct Formulario {
-    valores: [String; 10],
+    valores: [String; 11],
     indice: usize,
     favorito: bool,
+    //  Si la contraseña se enseña o va con puntos. Empieza tapada siempre,
+    //  también al editar una que ya existe: nadie la quiere en pantalla por
+    //  defecto con alguien detrás.
+    ver_clave: bool,
     //  Cómo se llamaba antes, para poder renombrar sin dejar el bloque viejo.
     original: String,
 }
@@ -376,6 +386,7 @@ impl Formulario {
                 servidor.alias.clone(),
                 servidor.host.clone(),
                 servidor.usuario.clone(),
+                servidor.contrasena.clone(),
                 servidor.puerto.clone(),
                 servidor.clave.clone(),
                 servidor.salto.clone(),
@@ -386,6 +397,7 @@ impl Formulario {
             ],
             indice: 0,
             favorito: servidor.favorito,
+            ver_clave: false,
             original: if servidor.rapido {
                 String::new()
             } else {
@@ -399,13 +411,17 @@ impl Formulario {
             alias: self.valores[0].trim().to_string(),
             host: self.valores[1].trim().to_string(),
             usuario: self.valores[2].trim().to_string(),
-            puerto: self.valores[3].trim().to_string(),
-            clave: self.valores[4].trim().to_string(),
-            salto: self.valores[5].trim().to_string(),
-            etiquetas: self.valores[6].trim().to_string(),
-            al_conectar: self.valores[7].trim().to_string(),
-            tinte: self.valores[8].trim().to_string(),
-            tuneles: self.valores[9].trim().to_string(),
+            //  La contraseña NO se recorta por los lados: un espacio al final
+            //  puede ser parte de ella, y quitárselo sería no entrar y no
+            //  saber por qué.
+            contrasena: self.valores[3].clone(),
+            puerto: self.valores[4].trim().to_string(),
+            clave: self.valores[5].trim().to_string(),
+            salto: self.valores[6].trim().to_string(),
+            etiquetas: self.valores[7].trim().to_string(),
+            al_conectar: self.valores[8].trim().to_string(),
+            tinte: self.valores[9].trim().to_string(),
+            tuneles: self.valores[10].trim().to_string(),
             favorito: self.favorito,
             rapido: false,
         }
@@ -514,6 +530,7 @@ impl TerminalView {
             fondo_sin_tinte: None,
             conectando: None,
             ultimo_tecleado: None,
+            clave_pendiente: None,
             campana_hasta: None,
             bloques: Vec::new(),
             tranquilo: false,
@@ -578,6 +595,7 @@ impl TerminalView {
             fondo_sin_tinte: None,
             conectando: None,
             ultimo_tecleado: None,
+            clave_pendiente: None,
             campana_hasta: None,
             bloques: Vec::new(),
             tranquilo: false,
@@ -1111,8 +1129,42 @@ impl TerminalView {
             },
             Instant::now(),
         ));
+        //  Si va con contraseña, se queda esperando a que ssh la pida. No se
+        //  manda antes: el otro lado todavía no está escuchando, y una
+        //  contraseña escrita antes de tiempo acaba en el prompt de aquí, a la
+        //  vista de todo el mundo y en el historial de la shell.
+        self.clave_pendiente = if elegido.contrasena.is_empty() {
+            None
+        } else {
+            Some((elegido.contrasena.clone(), Instant::now()))
+        };
         self.send_input_parts(&[format!("{mandato}\r").as_bytes()], cx);
         cx.notify();
+    }
+
+    fn atender_peticion_de_clave(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        let Some((clave, desde)) = self.clave_pendiente.clone() else {
+            return;
+        };
+        //  Medio minuto y se olvida. Si en ese rato no la ha pedido es que
+        //  entró con clave, que falló, o que estás en otra cosa: teclearla
+        //  entonces sería escribirla donde no toca.
+        if desde.elapsed() > Duration::from_secs(30) {
+            self.clave_pendiente = None;
+            return;
+        }
+        //  Quién sabe si esto es una petición de contraseña es el anfitrión,
+        //  como todo lo de casa: la vista lee el PTY, pero la lista de lo que
+        //  cuenta como «password:» vive donde se guardan las contraseñas, y la
+        //  isla usa esa misma.
+        let Some(gestor) = crate::gestor_servidores() else {
+            return;
+        };
+        if !(gestor.pide_clave)(&String::from_utf8_lossy(bytes)) {
+            return;
+        }
+        self.clave_pendiente = None;
+        self.send_input_parts(&[format!("{clave}\r").as_bytes()], cx);
     }
 
     fn elegido(&self) -> Option<crate::Servidor> {
@@ -1188,6 +1240,15 @@ impl TerminalView {
                 if let Some(f) = self.servidores.as_mut().and_then(|s| s.editando.as_mut()) {
                     let i = f.indice;
                     f.valores[i].pop();
+                }
+                cx.notify();
+                return;
+            }
+            //  Ver la contraseña. Como el ojo de cualquier formulario, pero
+            //  con tecla: aquí no hay ratón que llevar hasta un icono.
+            "o" if keystroke.modifiers.control => {
+                if let Some(f) = self.servidores.as_mut().and_then(|s| s.editando.as_mut()) {
+                    f.ver_clave = !f.ver_clave;
                 }
                 cx.notify();
                 return;
@@ -1809,6 +1870,11 @@ impl TerminalView {
 
     pub fn queue_output_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         const MAX_PENDING_OUTPUT_BYTES: usize = 256 * 1024;
+
+        //  Antes de nada: si lo que acaba de llegar es «password:», se
+        //  contesta. Aquí y no al pintar, que es donde llega TODO lo del otro
+        //  lado y sin esperar a que se dibuje.
+        self.atender_peticion_de_clave(bytes, cx);
 
         //  Se conectó (o falló, que también se ve): lo primero que llega del
         //  otro lado apaga el camino.
@@ -3814,7 +3880,7 @@ impl Render for TerminalView {
                         let activo = i == f.indice;
                         let valor = f.valores[i].clone();
                         //  La raya justo antes de lo nuestro.
-                        if i == 6 {
+                        if i == 7 {
                             caja = caja.child(div().h(px(1.)).my_1().bg(hsla(0., 0., 1.0, 0.08)));
                         }
                         caja = caja.child(
@@ -3828,12 +3894,16 @@ impl Render for TerminalView {
                                 .when(activo, |d| d.bg(hsla(0., 0., 0.20, 1.0)))
                                 .child(
                                     div()
-                                        .w(px(90.))
+                                        .w(px(102.))
                                         .text_color(if activo { gpui::white() } else { apagado })
                                         .child(*nombre),
                                 )
                                 .child(if valor.is_empty() {
                                     div().text_color(hsla(0., 0., 0.35, 1.0)).child(*ayuda)
+                                } else if i == 3 && !f.ver_clave {
+                                    div()
+                                        .text_color(gpui::white())
+                                        .child("•".repeat(valor.chars().count()))
                                 } else {
                                     div().text_color(gpui::white()).child(valor)
                                 }),
@@ -3845,7 +3915,9 @@ impl Render for TerminalView {
                             .px_2()
                             .pt_1()
                             .text_color(hsla(0., 0., 0.35, 1.0))
-                            .child("intro guarda · esc cancela · ↑↓ cambia de campo"),
+                            .child(
+                                "intro guarda · esc cancela · ↑↓ campo · ctrl+O ver la contraseña",
+                            ),
                     );
 
                     return caja;
