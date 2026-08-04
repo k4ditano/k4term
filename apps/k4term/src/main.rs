@@ -66,6 +66,19 @@ enum Marca {
     Acaba { salida: i32 },
 }
 
+//  Lo que sale del PTY, EN ORDEN: los bytes y las marcas por el mismo sitio.
+//
+//  Iban por dos canales y eso era una carrera perdida: el que pinta vaciaba
+//  primero los bytes y luego las marcas, así que una marca que llegara entre
+//  las dos vaciadas se aplicaba con el cursor donde estuviera —y el bloque de
+//  un `seq 1 60` acababa en la fila donde había empezado, sin filete en toda
+//  su salida—. Medido con traza: «ACABA en fila 0» para un mandato de sesenta
+//  líneas. Por un canal y en orden no hay carrera que perder.
+enum Trozo {
+    Bytes(Vec<u8>),
+    Marca(Marca),
+}
+
 struct Argumentos {
     ejecutar: Option<Vec<String>>,
     directorio: Option<PathBuf>,
@@ -519,13 +532,13 @@ fn main() {
             }
 
             let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>();
-            let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>();
+            let (stdout_tx, stdout_rx) = mpsc::channel::<Trozo>();
 
             //  Lo primero que ve el VT nuevo es la pantalla que traía la
             //  sesión: va por el mismo canal que el PTY porque para el
             //  terminal es lo mismo, bytes que pintar.
             if !pintura.is_empty() {
-                let _ = stdout_tx.send(std::mem::take(&mut pintura).into_bytes());
+                let _ = stdout_tx.send(Trozo::Bytes(std::mem::take(&mut pintura).into_bytes()));
             }
 
             if let Ok(mandato) = std::env::var("K4TERM_MANDATO") {
@@ -554,7 +567,6 @@ fn main() {
             //  se miran al vuelo y siguen intactos.
             let fin_del_chorro = fin_tx.clone();
             let (campana_tx, campana_rx) = mpsc::channel::<()>();
-            let (marcas_tx, marcas_rx) = mpsc::channel::<Marca>();
             let avisos = trabajos::notificador(std::process::id());
             thread::spawn(move || {
                 let mut buf = [0u8; 8192];
@@ -568,11 +580,30 @@ fn main() {
                         Err(_) => break,
                     };
 
-                    for suceso in escaner.tragar(&buf[..n]) {
+                    //  Con el SITIO de cada marca: el trozo se parte por ahí
+                    //  y va a cachos, con la marca en medio. Es lo mismo que
+                    //  hace la isla, y por lo mismo: mandar el trozo entero y
+                    //  apuntar después sitúa el mandato donde acabó la ráfaga.
+                    let sucesos = escaner.tragar_con_sitio(&buf[..n]);
+                    let mut cortado = 0usize;
+                    let mut roto = false;
+
+                    for (sitio, suceso) in sucesos {
+                        let marca = matches!(suceso, Suceso::Comienza | Suceso::Termina { .. });
+                        if marca && sitio > cortado {
+                            if stdout_tx
+                                .send(Trozo::Bytes(buf[cortado..sitio].to_vec()))
+                                .is_err()
+                            {
+                                roto = true;
+                                break;
+                            }
+                            cortado = sitio;
+                        }
                         match suceso {
                             Suceso::Mandato(m) => mandato = m,
                             Suceso::Comienza => {
-                                let _ = marcas_tx.send(Marca::Empieza);
+                                let _ = stdout_tx.send(Trozo::Marca(Marca::Empieza));
                                 //  Sin integración de shell no hay nombre, y
                                 //  un indicador que no dice qué corre no vale
                                 //  para nada: mejor callarse.
@@ -583,7 +614,7 @@ fn main() {
                                 }
                             }
                             Suceso::Termina { salida } => {
-                                let _ = marcas_tx.send(Marca::Acaba { salida });
+                                let _ = stdout_tx.send(Trozo::Marca(Marca::Acaba { salida }));
                                 let _ = avisos.send(Aviso::Acaba { salida });
                                 mandato.clear();
                             }
@@ -599,7 +630,14 @@ fn main() {
                         }
                     }
 
-                    if stdout_tx.send(buf[..n].to_vec()).is_err() {
+                    if roto {
+                        break;
+                    }
+                    if cortado < n
+                        && stdout_tx
+                            .send(Trozo::Bytes(buf[cortado..n].to_vec()))
+                            .is_err()
+                    {
                         break;
                     }
                 }
@@ -648,9 +686,29 @@ fn main() {
                             .timer(Duration::from_millis(16))
                             .await;
 
-                        let mut batch = Vec::new();
-                        while let Ok(chunk) = stdout_rx.try_recv() {
-                            batch.extend_from_slice(&chunk);
+                        //  En orden, tal como salió del PTY: los bytes se
+                        //  juntan y cada marca se queda apuntada DETRÁS de los
+                        //  suyos, para aplicarla cuando ya estén pintados.
+                        let mut tanda: Vec<(Vec<u8>, Vec<Marca>)> = Vec::new();
+                        while let Ok(trozo) = stdout_rx.try_recv() {
+                            match trozo {
+                                Trozo::Bytes(b) => {
+                                    if let Some(ultimo) = tanda.last_mut()
+                                        && ultimo.1.is_empty()
+                                    {
+                                        ultimo.0.extend_from_slice(&b);
+                                    } else {
+                                        tanda.push((b, Vec::new()));
+                                    }
+                                }
+                                Trozo::Marca(m) => {
+                                    if let Some(ultimo) = tanda.last_mut() {
+                                        ultimo.1.push(m);
+                                    } else {
+                                        tanda.push((Vec::new(), vec![m]));
+                                    }
+                                }
+                            }
                         }
 
                         // Del ambiente solo interesa el último: entre dos
@@ -658,8 +716,6 @@ fn main() {
                         // de una animación de tinte.
                         let ultimo_tema = std::iter::from_fn(|| temas.try_recv().ok()).last();
                         let campana = std::iter::from_fn(|| campana_rx.try_recv().ok()).count() > 0;
-                        let marcas: Vec<Marca> =
-                            std::iter::from_fn(|| marcas_rx.try_recv().ok()).collect();
                         let ajuste_nuevo = std::iter::from_fn(|| cambios.try_recv().ok()).last();
 
                         //  Y si la sesión se acabó, aquí es donde se cierra la
@@ -692,11 +748,10 @@ fn main() {
                         })
                         .ok();
 
-                        if batch.is_empty()
+                        if tanda.is_empty()
                             && ultimo_tema.is_none()
                             && !campana
                             && !apagando
-                            && marcas.is_empty()
                             && ajuste_nuevo.is_none()
                         {
                             continue;
@@ -706,21 +761,26 @@ fn main() {
                         let mut titulo = String::new();
                         cx.update(|ventana, cx| {
                             view_for_task.update(cx, |this, cx| {
-                                if !batch.is_empty() {
-                                    this.queue_output_bytes(&batch, cx);
+                                //  Cada marca, DESPUÉS de sus bytes y antes de
+                                //  los siguientes: el sitio de un mandato es el
+                                //  que ocupa el cursor una vez pintado lo suyo,
+                                //  ni antes ni después.
+                                for (bytes, marcas) in &tanda {
+                                    if !bytes.is_empty() {
+                                        this.queue_output_bytes(bytes, cx);
+                                    }
+                                    for marca in marcas {
+                                        match marca {
+                                            Marca::Empieza => this.empieza_bloque(cx),
+                                            Marca::Acaba { salida } => {
+                                                this.acaba_bloque(*salida, cx)
+                                            }
+                                        }
+                                    }
                                 }
                                 if let Some(t) = ultimo_tema {
                                     this.set_default_colors(rgb(t.tinta), rgb(t.fondo), cx);
                                     this.set_seco(t.seco, cx);
-                                }
-                                //  Las marcas van DESPUÉS de tragar la salida:
-                                //  el sitio donde empieza un mandato es el que
-                                //  ocupa el cursor una vez pintado lo suyo.
-                                for marca in &marcas {
-                                    match marca {
-                                        Marca::Empieza => this.empieza_bloque(cx),
-                                        Marca::Acaba { salida } => this.acaba_bloque(*salida, cx),
-                                    }
                                 }
                                 //  Ajustes cambiados en caliente: lo que se
                                 //  toque en la barra se ve aquí sin reabrir.

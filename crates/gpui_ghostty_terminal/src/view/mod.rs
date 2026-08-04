@@ -733,6 +733,9 @@ impl TerminalView {
         if self.bloques.len() > 2000 {
             self.bloques.drain(..500);
         }
+        if std::env::var("K4TERM_TRAZA_BLOQUES").is_ok() {
+            eprintln!("bloque EMPIEZA en fila {fila}");
+        }
         self.bloques.push(Bloque {
             inicio: fila,
             fin: None,
@@ -755,6 +758,12 @@ impl TerminalView {
         }
 
         let fila = self.fila_absoluta_del_cursor();
+        if std::env::var("K4TERM_TRAZA_BLOQUES").is_ok() {
+            eprintln!(
+                "bloque ACABA en fila {fila:?} (salida {salida}) · último inicio {:?}",
+                self.bloques.last().map(|b| b.inicio)
+            );
+        }
         if let Some(b) = self.bloques.last_mut()
             && b.fin.is_none()
         {
