@@ -154,7 +154,10 @@ The examples set `TERM=xterm-256color` and `COLORTERM=truecolor` to help apps en
 
 `ctrl+,` — or the little gear in the corner — opens k4term's own settings:
 font size, glass, cursor trail and quiet mode. Pick with `↑↓`, change with
-`←→`, `esc` closes.
+`←→`, `esc` closes. It works with the mouse too: click a row to cycle its
+value (right-click goes back), and click outside to close. The server picker
+is the same — click a server to connect, right-click to just select it, click
+a field of the form to jump to it.
 
 They are written to `~/.config/k4term/k4term.conf`, line by line, leaving your
 comments and any keys not offered here untouched — that file stays the source

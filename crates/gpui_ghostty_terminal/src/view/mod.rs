@@ -4110,6 +4110,24 @@ impl Render for TerminalView {
                             )
                     }),
             )
+            //  Un fondo que se traga el clic mientras hay algo abierto.
+            //
+            //  Dos cosas a la vez, y las dos hacen falta: pulsar FUERA cierra
+            //  —es lo que espera cualquiera de un panel— y, mientras está
+            //  abierto, el clic no se cuela hasta la terminal de detrás, que si
+            //  no se acababa seleccionando texto por debajo del modal.
+            .children(
+                (self.servidores.is_some() || self.ajustes.is_some()).then(|| {
+                    div().absolute().inset_0().on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.servidores = None;
+                            this.ajustes = None;
+                            cx.notify();
+                        }),
+                    )
+                }),
+            )
             //  El selector de servidores, en medio y arriba: tapa parte de lo
             //  que hay debajo, y es a propósito — elegir a dónde ir es lo
             //  único que estás haciendo mientras está abierto.
@@ -4122,6 +4140,9 @@ impl Render for TerminalView {
                 //  ver—, pero si algo se escapa, se queda dentro igualmente.
                 //  Sin esto, un nombre largo se salía por la derecha del
                 //  recuadro y se leía por encima de la terminal.
+                //  Lo que se pulse DENTRO se queda dentro: sin esto el clic
+                //  seguía hasta el fondo que cierra, así que elegir un valor
+                //  lo cambiaba y cerraba el panel en el mismo gesto.
                 let mut caja = div()
                     .absolute()
                     .top_8()
@@ -4131,6 +4152,8 @@ impl Render for TerminalView {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                     .gap_1()
                     .p_2()
                     .rounded(radio)
@@ -4184,6 +4207,24 @@ impl Render for TerminalView {
                                 .py_0p5()
                                 .rounded(px(8.))
                                 .when(activo, |d| d.bg(hsla(0., 0., 0.20, 1.0)))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(hsla(0., 0., 0.16, 1.0)))
+                                //  Pulsar un campo lo pone al frente: escribir
+                                //  sigue siendo del teclado, pero elegir dónde
+                                //  ya no obliga a bajar con las flechas.
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _, cx| {
+                                        if let Some(f) = this
+                                            .servidores
+                                            .as_mut()
+                                            .and_then(|s| s.editando.as_mut())
+                                        {
+                                            f.indice = i;
+                                        }
+                                        cx.notify();
+                                    }),
+                                )
                                 .child(
                                     div()
                                         .w(px(102.))
@@ -4278,6 +4319,30 @@ impl Render for TerminalView {
                             .py_1()
                             .rounded(px(8.))
                             .when(esta, |d| d.bg(hsla(0., 0., 0.20, 1.0)))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(hsla(0., 0., 0.16, 1.0)))
+                            //  Un clic elige y entra: esto es un selector, y lo
+                            //  que uno hace con el ratón sobre el sitio al que
+                            //  quiere ir es pulsarlo. El botón derecho solo
+                            //  elige, para poder mirarlo antes de entrar.
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    if let Some(s) = this.servidores.as_mut() {
+                                        s.indice = i;
+                                    }
+                                    this.conectar_al_elegido(cx);
+                                }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, _, _, cx| {
+                                    if let Some(s) = this.servidores.as_mut() {
+                                        s.indice = i;
+                                    }
+                                    cx.notify();
+                                }),
+                            )
                             .child(
                                 div()
                                     .text_color(if servidor.favorito {
@@ -4346,7 +4411,7 @@ impl Render for TerminalView {
                         .flex()
                         .flex_col()
                         .text_color(hsla(0., 0., 0.35, 1.0))
-                        .child("intro conecta · ctrl+S guarda o edita")
+                        .child("intro o clic conecta · ctrl+S guarda o edita")
                         .child("ctrl+G agentes · ctrl+F favorito · supr borra"),
                 )
             }))
@@ -4362,6 +4427,9 @@ impl Render for TerminalView {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
+                    //  Igual que el de servidores: el clic de dentro no sale.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                     .gap_1()
                     .p_2()
                     .rounded(px(12.))
@@ -4401,6 +4469,28 @@ impl Render for TerminalView {
                             .py_1()
                             .rounded(px(8.))
                             .when(esta, |d| d.bg(hsla(0., 0., 0.20, 1.0)))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(hsla(0., 0., 0.16, 1.0)))
+                            //  Pulsar una fila la elige y pasa al valor
+                            //  siguiente; con el botón derecho, al anterior.
+                            //  Es lo mismo que hacen ←→, y así el panel se
+                            //  puede usar entero sin tocar el teclado.
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.ajustes = Some(i);
+                                    this.cambiar_ajuste(i, true);
+                                    cx.notify();
+                                }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.ajustes = Some(i);
+                                    this.cambiar_ajuste(i, false);
+                                    cx.notify();
+                                }),
+                            )
                             .child(
                                 div()
                                     .w(px(150.))
@@ -4456,7 +4546,7 @@ impl Render for TerminalView {
                         .flex()
                         .flex_col()
                         .text_color(hsla(0., 0., 0.35, 1.0))
-                        .child("↑↓ elige · ←→ cambia · esc cierra")
+                        .child("↑↓ elige · ←→ o clic cambia · esc cierra")
                         .child("se guarda solo en ~/.config/k4term/k4term.conf"),
                 )
             }))
