@@ -1296,6 +1296,10 @@ fn main() {
             cmd.env("TERM", "xterm-256color");
             cmd.env("COLORTERM", "truecolor");
             cmd.env("TERM_PROGRAM", "k4term");
+            //  Las marcas de agente no pasan de aquí: ver `entorno`.
+            for marca in k4term_puente::entorno::MARCAS_DE_AGENTE {
+                cmd.env_remove(marca);
+            }
             //  Lo mismo que en la ventana: los nombres de tus servidores para
             //  quien corra aquí dentro. Solo los nombres.
             let servidores = k4term_puente::servidores::alias_para_entorno();

@@ -9,6 +9,7 @@
 pub mod ajustes;
 pub mod barra;
 pub mod edinot;
+pub mod entorno;
 pub mod osc;
 pub mod senal;
 pub mod servidores;
