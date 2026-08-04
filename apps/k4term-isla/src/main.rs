@@ -1296,6 +1296,16 @@ fn main() {
             cmd.env("TERM", "xterm-256color");
             cmd.env("COLORTERM", "truecolor");
             cmd.env("TERM_PROGRAM", "k4term");
+            //  Lo mismo que en la ventana: los nombres de tus servidores para
+            //  quien corra aquí dentro. Solo los nombres.
+            let servidores = k4term_puente::servidores::alias_para_entorno();
+            if !servidores.is_empty() {
+                cmd.env("K4_SERVIDORES", servidores);
+            }
+            let agentes = k4term_puente::servidores::alias_de_agentes_para_entorno();
+            if !agentes.is_empty() {
+                cmd.env("K4_SERVIDORES_AGENTES", agentes);
+            }
             if let Ok(home) = std::env::var("HOME") {
                 cmd.cwd(home);
             }

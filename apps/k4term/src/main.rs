@@ -204,6 +204,8 @@ fn main() {
         //  fichero no sabe decir. La vista solo pinta y filtra: de dónde viene
         //  la lista, y qué significa guardarla, lo sabe esta capa.
         fn como_vista(s: k4term_puente::Servidor) -> gpui_ghostty_terminal::Servidor {
+            //  Antes de repartir los campos, que luego el alias ya no está.
+            let agentes = servidores::tiene_agentes(&s.alias);
             gpui_ghostty_terminal::Servidor {
                 alias: s.alias,
                 usuario: s.usuario,
@@ -215,6 +217,7 @@ fn main() {
                 tuneles: s.tuneles,
                 favorito: s.favorito,
                 etiquetas: s.etiquetas.join(" "),
+                agentes,
                 al_conectar: s.al_conectar,
                 contrasena: s.contrasena,
                 rapido: false,
@@ -240,7 +243,16 @@ fn main() {
         }
 
         gpui_ghostty_terminal::registrar_servidores(gpui_ghostty_terminal::GestorServidores {
-            listar: Box::new(|| servidores::leer().into_iter().map(como_vista).collect()),
+            //  Los alias de agentes no salen en la lista: son la puerta de
+            //  atrás de un servidor que ya está ahí arriba, no un sitio más
+            //  al que ir. Se ven como una marca en el suyo.
+            listar: Box::new(|| {
+                servidores::leer()
+                    .into_iter()
+                    .filter(|s| !servidores::es_alias_de_agentes(&s.alias))
+                    .map(como_vista)
+                    .collect()
+            }),
             al_vuelo: Box::new(|texto| servidores::como_destino(texto).map(como_vista)),
             visitar: Box::new(|alias| {
                 let ahora = std::time::SystemTime::now()
@@ -264,6 +276,29 @@ fn main() {
             color: Box::new(servidores::color_del_tinte),
             pide_clave: Box::new(servidores::es_peticion_de_clave),
             pregunta_huella: Box::new(servidores::es_pregunta_de_huella),
+            //  Abrir la puerta escribe el bloque aquí y devuelve lo que hay
+            //  que correr allí: crear la clave si no está y mandarla. Cerrarla
+            //  quita el bloque y devuelve el mandato que borra la línea del
+            //  servidor, que se busca por la marca de la clave.
+            agentes: Box::new(|s, dar| {
+                let clave = servidores::ruta_clave_agentes();
+                let marca = servidores::marca_clave_agentes();
+                if dar {
+                    let _ = servidores::abrir_a_agentes(&como_puente(s));
+                    format!(
+                        "[ -f {c} ] || ssh-keygen -t ed25519 -N '' -C '{marca}' -f {c}; \
+                         ssh-copy-id -i {c}.pub {alias}",
+                        c = clave.display(),
+                        alias = s.alias
+                    )
+                } else {
+                    servidores::cerrar_a_agentes(&s.alias);
+                    format!(
+                        "ssh {alias} \"sed -i '/{marca}/d' ~/.ssh/authorized_keys\"",
+                        alias = s.alias
+                    )
+                }
+            }),
         });
 
         //  El botón de ajustes solo existe si hay barra que los enseñe.
@@ -406,6 +441,20 @@ fn main() {
                     cmd.env("TERM", "xterm-256color");
                     cmd.env("COLORTERM", "truecolor");
                     cmd.env("TERM_PROGRAM", "k4term");
+                    //  Los nombres de tus servidores, para lo que corra aquí
+                    //  dentro. Solo los nombres —ni máquinas, ni usuarios, ni
+                    //  contraseñas— y por eso puede ir al entorno sin más: un
+                    //  agente que lea esto sabe que existe «casa» y propone
+                    //  `ssh casa` en vez de preguntarte la IP. Los de agentes
+                    //  van aparte, que son otra puerta.
+                    let servidores = k4term_puente::servidores::alias_para_entorno();
+                    if !servidores.is_empty() {
+                        cmd.env("K4_SERVIDORES", servidores);
+                    }
+                    let agentes = k4term_puente::servidores::alias_de_agentes_para_entorno();
+                    if !agentes.is_empty() {
+                        cmd.env("K4_SERVIDORES_AGENTES", agentes);
+                    }
                     if let Some(d) = directorio_inicial(args.directorio) {
                         cmd.cwd(d);
                     }

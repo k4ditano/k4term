@@ -508,6 +508,122 @@ fn escribir_extras(ruta: &std::path::Path, mapa: &serde_json::Map<String, serde_
     }
 }
 
+//  ── la puerta de los agentes ──────────────────────────────────────
+//
+//  Un agente que corre dentro de la terminal ya tiene tu shell, así que
+//  puede lanzar `ssh` él solo. Lo que no puede es teclear una contraseña —sus
+//  mandatos salen por tuberías, no por el PTY que vigilamos— y darle la
+//  contraseña sería darle TODO: cualquier orden suya entraría en producción
+//  sin que la vieras.
+//
+//  Así que se le da otra cosa: una clave PROPIA, un alias PROPIO y, en el
+//  servidor, lo que tú quieras dejarle en su `authorized_keys`. Se revoca
+//  borrando una línea allí, sin tocar tus claves ni tus accesos. Y como el
+//  alias es otro —`casa-agentes`—, en el servidor se distingue quién ha
+//  entrado: tú o algo que corre por ti.
+pub const SUFIJO_AGENTES: &str = "-agentes";
+
+pub fn ruta_clave_agentes() -> PathBuf {
+    casa().join(".ssh/k4-agentes")
+}
+
+//  El comentario de la clave es lo que permite quitarla del servidor luego
+//  sin adivinar: se busca esa marca en `authorized_keys` y se borra su línea.
+pub fn marca_clave_agentes() -> String {
+    format!(
+        "k4-agentes@{}",
+        std::fs::read_to_string("/etc/hostname")
+            .map(|t| t.trim().to_string())
+            .unwrap_or_else(|_| "k4".into())
+    )
+}
+
+pub fn alias_de_agentes(alias: &str) -> String {
+    format!("{alias}{SUFIJO_AGENTES}")
+}
+
+pub fn es_alias_de_agentes(alias: &str) -> bool {
+    alias.ends_with(SUFIJO_AGENTES)
+}
+
+//  El bloque del alias de agentes: el mismo sitio, pero entrando con SU clave
+//  y solo con ella. `IdentitiesOnly` no es un adorno: sin él ssh ofrece
+//  también las tuyas y entrarías como tú sin enterarte, que es justo lo que
+//  esta separación viene a evitar.
+pub fn bloque_agentes(servidor: &Servidor) -> String {
+    let mut texto = format!("\nHost {}\n", alias_de_agentes(&servidor.alias));
+    texto.push_str(&format!("    HostName {}\n", servidor.host));
+    for (clave, valor) in [("User", &servidor.usuario), ("Port", &servidor.puerto)] {
+        if !valor.is_empty() {
+            texto.push_str(&format!("    {clave} {valor}\n"));
+        }
+    }
+    texto.push_str(&format!(
+        "    IdentityFile {}\n",
+        ruta_clave_agentes().display()
+    ));
+    texto.push_str("    IdentitiesOnly yes\n");
+    texto.push_str("    StrictHostKeyChecking accept-new\n");
+    texto
+}
+
+pub fn tiene_agentes(alias: &str) -> bool {
+    let texto = std::fs::read_to_string(ruta_ssh()).unwrap_or_default();
+    let buscado = alias_de_agentes(alias);
+    texto.lines().any(|l| {
+        let l = l.trim();
+        l.strip_prefix("Host ")
+            .map(|resto| resto.split_whitespace().any(|h| h == buscado))
+            .unwrap_or(false)
+    })
+}
+
+pub fn abrir_a_agentes(servidor: &Servidor) -> Result<(), String> {
+    let ruta = ruta_ssh();
+    let anterior = std::fs::read_to_string(&ruta).unwrap_or_default();
+    let mut texto = sin_bloque(&anterior, &alias_de_agentes(&servidor.alias));
+    if !texto.is_empty() && !texto.ends_with('\n') {
+        texto.push('\n');
+    }
+    texto.push_str(&bloque_agentes(servidor));
+    std::fs::write(&ruta, texto).map_err(|e| e.to_string())?;
+    permisos(&ruta, 0o600);
+    Ok(())
+}
+
+pub fn cerrar_a_agentes(alias: &str) {
+    let ruta = ruta_ssh();
+    let Ok(texto) = std::fs::read_to_string(&ruta) else {
+        return;
+    };
+    let _ = std::fs::write(&ruta, sin_bloque(&texto, &alias_de_agentes(alias)));
+}
+
+//  Los nombres de tus servidores, para que un agente sepa que existen sin
+//  tener que preguntártelo. SOLO los nombres: ni máquinas, ni usuarios, ni
+//  nada que se parezca a un secreto. Va al entorno de la shell que abre la
+//  terminal, así que se hace una vez al arrancar y no cambia hasta la
+//  siguiente.
+pub fn alias_para_entorno() -> String {
+    let mut alias: Vec<String> = leer()
+        .into_iter()
+        .map(|s| s.alias)
+        .filter(|a| !es_alias_de_agentes(a))
+        .collect();
+    alias.sort();
+    alias.join(" ")
+}
+
+pub fn alias_de_agentes_para_entorno() -> String {
+    let mut alias: Vec<String> = leer()
+        .into_iter()
+        .map(|s| s.alias)
+        .filter(|a| es_alias_de_agentes(a))
+        .collect();
+    alias.sort();
+    alias.join(" ")
+}
+
 fn permisos(ruta: &std::path::Path, modo: u32) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(ruta, std::fs::Permissions::from_mode(modo));
@@ -667,6 +783,36 @@ Host trabajo   trabajo.corto
             !bloque.contains("secreta123"),
             "la contraseña se ha escrito en el ssh_config"
         );
+    }
+
+    //  ── la puerta de los agentes ──────────────────────────────────
+    #[test]
+    fn el_bloque_de_agentes_entra_solo_con_su_clave() {
+        let bloque = bloque_agentes(&Servidor {
+            alias: "casa".into(),
+            host: "10.0.0.5".into(),
+            usuario: "abel".into(),
+            contrasena: "secreta".into(),
+            ..Default::default()
+        });
+        assert!(bloque.contains("Host casa-agentes"));
+        assert!(bloque.contains("HostName 10.0.0.5"));
+        assert!(bloque.contains("IdentityFile"));
+        //  Sin esto ssh ofrecería también tus claves y el agente entraría
+        //  como tú, que es justo lo que esta puerta viene a evitar.
+        assert!(bloque.contains("IdentitiesOnly yes"));
+        //  Y la contraseña no pinta nada aquí: esta puerta va con clave.
+        assert!(!bloque.contains("secreta"));
+    }
+
+    #[test]
+    fn los_alias_de_agentes_se_reconocen() {
+        assert_eq!(alias_de_agentes("casa"), "casa-agentes");
+        assert!(es_alias_de_agentes("casa-agentes"));
+        assert!(!es_alias_de_agentes("casa"));
+        //  Y uno que se llame así de suyo no se confunde con el de nadie:
+        //  lo que se mira es el final, no una parte cualquiera.
+        assert!(!es_alias_de_agentes("agentes-casa"));
     }
 
     #[test]

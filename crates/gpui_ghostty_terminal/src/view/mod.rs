@@ -375,6 +375,9 @@ struct Formulario {
     valores: [String; 11],
     indice: usize,
     favorito: bool,
+    //  Se guarda tal cual estaba: guardar un servidor no debe cerrarle la
+    //  puerta a los agentes sin que nadie lo haya pedido.
+    agentes: bool,
     //  Si la contraseña se enseña o va con puntos. Empieza tapada siempre,
     //  también al editar una que ya existe: nadie la quiere en pantalla por
     //  defecto con alguien detrás.
@@ -401,6 +404,7 @@ impl Formulario {
             ],
             indice: 0,
             favorito: servidor.favorito,
+            agentes: servidor.agentes,
             ver_clave: false,
             original: if servidor.rapido {
                 String::new()
@@ -427,6 +431,9 @@ impl Formulario {
             tinte: self.valores[9].trim().to_string(),
             tuneles: self.valores[10].trim().to_string(),
             favorito: self.favorito,
+            //  El formulario no toca la puerta de los agentes: se abre y se
+            //  cierra desde la lista, con su mandato a la vista.
+            agentes: self.agentes,
             rapido: false,
         }
     }
@@ -1060,6 +1067,10 @@ impl TerminalView {
                 self.favorito_elegido(cx);
                 return;
             }
+            "g" if keystroke.modifiers.control => {
+                self.agentes_elegido(cx);
+                return;
+            }
             _ => {}
         }
 
@@ -1382,6 +1393,27 @@ impl TerminalView {
         }
         (gestor.favorito)(&elegido.alias);
         self.refrescar_servidores(cx);
+    }
+
+    //  Abrir o cerrar la puerta de los agentes de este servidor.
+    //
+    //  Aquí se escribe el bloque —o se quita— y el mandato que falta se
+    //  TECLEA en la sesión, no se corre a escondidas: mandar una clave a un
+    //  servidor pide tu contraseña y quitarla toca su `authorized_keys`. Las
+    //  dos cosas tienes que verlas pasar.
+    fn agentes_elegido(&mut self, cx: &mut Context<Self>) {
+        let (Some(elegido), Some(gestor)) = (self.elegido(), crate::gestor_servidores()) else {
+            return;
+        };
+        if elegido.rapido {
+            return;
+        }
+        let mandato = (gestor.agentes)(&elegido, !elegido.agentes);
+        self.servidores = None;
+        if !mandato.is_empty() {
+            self.send_input_parts(&[format!("{mandato}\r").as_bytes()], cx);
+        }
+        cx.notify();
     }
 
     fn borrar_elegido(&mut self, cx: &mut Context<Self>) {
@@ -4069,6 +4101,13 @@ impl Render for TerminalView {
                                         "·"
                                     }),
                             )
+                            //  La puerta de los agentes, si está abierta. Es
+                            //  un permiso: se ve en la lista o no se revisa.
+                            .child(
+                                div()
+                                    .text_color(hsla(0.33, 0.6, 0.55, 1.0))
+                                    .child(if servidor.agentes { "⚙" } else { "" }),
+                            )
                             .child(div().text_color(gpui::white()).child(if servidor.rapido {
                                 format!("conectar a {}", servidor.host)
                             } else {
@@ -4085,7 +4124,7 @@ impl Render for TerminalView {
                         .px_2()
                         .pt_1()
                         .text_color(hsla(0., 0., 0.35, 1.0))
-                        .child("intro conecta · ctrl+S guarda o edita · supr borra"),
+                        .child("intro conecta · ctrl+S guarda · ctrl+G agentes · supr borra"),
                 )
             }))
             .children(self.busqueda.as_ref().map(|b| {

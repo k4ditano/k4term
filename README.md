@@ -173,6 +173,38 @@ Saved hosts get `StrictHostKeyChecking accept-new` in their block, so the
 first-time fingerprint question does not interrupt the connection. A key that
 *changes* still stops it, which is the case that matters.
 
+## Agents and SSH
+
+Anything running inside k4term — an AI agent, a script, a build — already has
+your shell, so it can run `ssh` on its own. What it cannot do is type a
+password: its commands go through pipes, not through the PTY the terminal
+watches. Handing it your password would hand it everything.
+
+So it gets something else. `ctrl+G` on a server opens **the agents' door**:
+
+- a **dedicated key**, `~/.ssh/k4-agentes`, created on the spot if it is not
+  there and sent with `ssh-copy-id` — you see the command run, because it asks
+  for your password and that is not done behind your back;
+- a **dedicated alias**, `<server>-agentes`, pointing at the same machine but
+  with `IdentitiesOnly yes`, so that key and only that key gets offered. On the
+  server side you can then restrict it (`restrict`, `command=…`) in
+  `authorized_keys` and know that whoever came in through that door came as the
+  agent, not as you;
+- revoking is `ctrl+G` again: the alias goes, and the terminal runs the command
+  that deletes that key's line over there. The key carries a mark
+  (`k4-agentes@<your machine>`) precisely so the line can be found.
+
+Servers with the door open show a `⚙` in the list. The `-agentes` aliases do
+not show up as entries of their own: they are a permission on a server, not
+another place to go.
+
+Every session also gets the **names** of your servers in its environment —
+`K4_SERVIDORES`, and `K4_SERVIDORES_AGENTES` for the ones with the door open.
+Names only: no hosts, no users, no secrets. It is enough for an agent to know
+that `casa` exists and offer `ssh casa` instead of asking you for the IP. The
+list is read when the session starts, so a server added afterwards shows up in
+the next one.
+
 ## License
 
 This project is licensed under the Apache License, Version 2.0. See `LICENSE`.

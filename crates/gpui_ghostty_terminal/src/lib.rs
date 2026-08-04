@@ -45,6 +45,10 @@ pub struct Servidor {
     //  —fichero propio con 600— y aquí viaja solo para poder escribirla en el
     //  formulario y tecleársela a ssh cuando la pida.
     pub contrasena: String,
+    //  Si este servidor tiene abierta la puerta de los agentes: su propio
+    //  alias con su propia clave. Se enseña en la lista porque es un permiso,
+    //  y un permiso que no se ve no se revisa nunca.
+    pub agentes: bool,
     //  Un destino escrito al vuelo, todavía sin guardar: se pinta distinto y
     //  es lo único que se puede guardar.
     pub rapido: bool,
@@ -78,6 +82,10 @@ type PorServidor = dyn Fn(&Servidor) + Send + Sync;
 type SinNada = dyn Fn() + Send + Sync;
 type ColorPorNombre = dyn Fn(&str) -> Option<(u8, u8, u8)> + Send + Sync;
 type MiraTexto = dyn Fn(&str) -> bool + Send + Sync;
+//  Dar o quitar la puerta de los agentes. Devuelve el mandato que hay que
+//  correr para terminar el trabajo —mandar la clave, o quitarla de allí—,
+//  porque eso pide tu contraseña y lo tienes que ver tú.
+type PuertaAgentes = dyn Fn(&Servidor, bool) -> String + Send + Sync;
 
 pub struct GestorServidores {
     pub listar: Box<Listar>,
@@ -101,6 +109,7 @@ pub struct GestorServidores {
     //  Y si es la pregunta de la huella, la de la primera vez que entras a una
     //  máquina. Por lo mismo: la vista lee, el anfitrión sabe.
     pub pregunta_huella: Box<MiraTexto>,
+    pub agentes: Box<PuertaAgentes>,
 }
 
 static GESTOR: std::sync::OnceLock<GestorServidores> = std::sync::OnceLock::new();
