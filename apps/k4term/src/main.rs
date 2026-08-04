@@ -18,7 +18,7 @@
 
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
@@ -112,10 +112,10 @@ fn directorio_inicial(pedido: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(d) = pedido {
         return Some(d);
     }
-    if let Ok(actual) = std::env::current_dir() {
-        if actual != PathBuf::from("/") {
-            return Some(actual);
-        }
+    if let Ok(actual) = std::env::current_dir()
+        && actual != *Path::new("/")
+    {
+        return Some(actual);
     }
     std::env::var("HOME").ok().map(PathBuf::from)
 }

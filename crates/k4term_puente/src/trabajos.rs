@@ -69,25 +69,25 @@ pub fn notificador_con(contar: impl Fn(Parte) + Send + 'static) -> Sender<Aviso>
                     curso = Some((mandato, Instant::now(), false));
                 }
                 Ok(Aviso::Acaba { salida }) => {
-                    if let Some((mandato, desde, anunciado)) = curso.take() {
-                        if anunciado {
-                            contar(Parte::Acabado {
-                                mandato,
-                                salida,
-                                segundos: desde.elapsed().as_secs(),
-                            });
-                        }
+                    if let Some((mandato, desde, anunciado)) = curso.take()
+                        && anunciado
+                    {
+                        contar(Parte::Acabado {
+                            mandato,
+                            salida,
+                            segundos: desde.elapsed().as_secs(),
+                        });
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    if let Some((mandato, desde, anunciado)) = &mut curso {
-                        if !*anunciado {
-                            contar(Parte::Empezado {
-                                mandato: mandato.clone(),
-                                segundos: desde.elapsed().as_secs(),
-                            });
-                            *anunciado = true;
-                        }
+                    if let Some((mandato, desde, anunciado)) = &mut curso
+                        && !*anunciado
+                    {
+                        contar(Parte::Empezado {
+                            mandato: mandato.clone(),
+                            segundos: desde.elapsed().as_secs(),
+                        });
+                        *anunciado = true;
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => break,

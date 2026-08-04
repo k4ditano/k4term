@@ -1207,11 +1207,17 @@ impl TerminalView {
         if keystroke.modifiers.control || keystroke.modifiers.alt {
             return;
         }
-        if let Some(texto) = keystroke.key_char.as_ref()
-            && let Some(f) = self.servidores.as_mut().and_then(|s| s.editando.as_mut())
-        {
-            let i = f.indice;
-            f.valores[i].push_str(texto);
+        //  Por el MISMO camino que el resto del selector, y no metiendo el
+        //  texto a mano en el campo.
+        //
+        //  El texto llega por dos vías —las teclas y el método de entrada— y
+        //  la segunda descarta lo que acabe de entrar por la primera mirando
+        //  esta marca. Escribiéndolo aquí a mano la marca no se ponía, así que
+        //  el método de entrada no reconocía la letra como ya escrita y la
+        //  volvía a añadir: en el formulario se escribía todo doble.
+        if let Some(texto) = keystroke.key_char.clone() {
+            self.ultimo_tecleado = Some((texto.clone(), Instant::now()));
+            self.texto_al_selector(&texto);
             cx.notify();
         }
     }

@@ -114,10 +114,10 @@ pub fn vigilar(ruta: PathBuf) -> Receiver<Tema> {
             //  un JSON truncado se descarta en silencio y no vuelve a
             //  intentarse hasta el siguiente aviso.
             std::thread::sleep(Duration::from_millis(30));
-            if let Some(tema) = leer(&ruta) {
-                if tx.send(tema).is_err() {
-                    return;
-                }
+            if let Some(tema) = leer(&ruta)
+                && tx.send(tema).is_err()
+            {
+                return;
             }
         }
     });
