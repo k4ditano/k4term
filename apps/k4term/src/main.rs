@@ -27,7 +27,7 @@ use std::time::Duration;
 use gpui::{App, AppContext, Application, KeyBinding, TitlebarOptions, WindowOptions};
 use gpui_ghostty_terminal::view::{
     Appearance, Copy, CopyLastOutput, DecreaseFontSize, Find, IncreaseFontSize, NextBlock, Paste,
-    PreviousBlock, ResetFontSize, SelectAll, SendBlockToNote, SendSessionToNote, Servers,
+    PreviousBlock, ResetFontSize, SelectAll, SendBlockToNote, SendSessionToNote, Servers, Settings,
     TerminalInput, TerminalView, ToIsland, ToggleQuiet,
 };
 use gpui_ghostty_terminal::{Rgb, TerminalConfig, TerminalSession};
@@ -198,6 +198,9 @@ fn main() {
             KeyBinding::new("ctrl-shift-i", ToIsland, None),
             //  Y los servidores de uno, sin salir de la ventana.
             KeyBinding::new("ctrl-shift-s", Servers, None),
+            //  La coma con control: es la tecla de los ajustes en todas
+            //  partes, y aquí no la usaba nadie.
+            KeyBinding::new("ctrl-,", Settings, None),
         ]);
 
         //  La puerta a Edinot solo se abre si Edinot está. Quien no lo tenga
@@ -317,6 +320,37 @@ fn main() {
         //  El botón de ajustes solo existe si hay barra que los enseñe.
         if barra::hay_barra() {
             gpui_ghostty_terminal::registrar_ajustes(barra::abrir_ajustes);
+
+            //  Y los ajustes PROPIOS, que se tocan dentro de la terminal.
+            //
+            //  Estaban solo en la barra, y quien use k4term sin ella no tenía
+            //  forma de cambiar el tamaño de letra ni el cristal sin editar un
+            //  fichero a mano. El fichero es el mismo y se escribe igual
+            //  —línea a línea, sin pisar lo que haya puesto nadie—, así que
+            //  los dos caminos conviven y el cambio se ve al instante por el
+            //  vigía de siempre.
+            gpui_ghostty_terminal::registrar_ajustes_propios(
+                gpui_ghostty_terminal::GestorAjustes {
+                    poner: Box::new(|clave, valor| {
+                        let _ = k4term_puente::ajustes::poner(clave, valor);
+                    }),
+                    leer: Box::new(|| {
+                        let a = k4term_puente::Ajustes::leer();
+                        vec![
+                            ("tamaño".to_string(), format!("{}", a.tamano)),
+                            ("opacidad".to_string(), format!("{}", a.opacidad)),
+                            (
+                                "estela".to_string(),
+                                if a.estela > 0 { "si" } else { "no" }.to_string(),
+                            ),
+                            (
+                                "tranquilo".to_string(),
+                                if a.tranquilo { "si" } else { "no" }.to_string(),
+                            ),
+                        ]
+                    }),
+                },
+            );
         }
 
         let opciones = WindowOptions {

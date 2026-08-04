@@ -30,7 +30,8 @@ actions!(
         SendBlockToNote,
         SendSessionToNote,
         ToIsland,
-        Servers
+        Servers,
+        Settings
     ]
 );
 
@@ -295,6 +296,8 @@ pub struct TerminalView {
     clave_pendiente: Option<(String, Instant)>,
     //  Y desde cuándo se está atento a la pregunta de la huella.
     huella_desde: Option<Instant>,
+    //  El panel de ajustes de la terminal, con el ajuste en el que estás.
+    ajustes: Option<usize>,
     //  Hasta cuándo dura el destello de la campana.
     campana_hasta: Option<std::time::Instant>,
     //  Los mandatos que han pasado por aquí, en coordenadas del historial.
@@ -344,6 +347,57 @@ struct Servidores {
     //  cambiando de cara, no un diálogo encima de otro.
     editando: Option<Formulario>,
 }
+
+//  Los ajustes que se ofrecen, con sus valores posibles.
+//
+//  Los mismos cuatro que enseña la barra y con los mismos nombres de clave:
+//  el fichero es uno solo y lo escriben los dos. Aquí no hay más porque estos
+//  son los que se tocan; el resto —fuente, margen, shell— se edita a mano en
+//  `~/.config/k4term/k4term.conf`, que sigue mandando igual.
+struct Ajuste {
+    clave: &'static str,
+    nombre: &'static str,
+    ayuda: &'static str,
+    //  (lo que se guarda, lo que se lee)
+    valores: &'static [(&'static str, &'static str)],
+    por_defecto: &'static str,
+}
+
+const AJUSTES: [Ajuste; 4] = [
+    Ajuste {
+        clave: "tamaño",
+        nombre: "Tamaño de letra",
+        ayuda: "de esta ventana",
+        valores: &[("11", "11"), ("13", "13"), ("15", "15"), ("18", "18")],
+        por_defecto: "13",
+    },
+    Ajuste {
+        clave: "opacidad",
+        nombre: "Cristal",
+        ayuda: "cuánto se ve del fondo por detrás",
+        valores: &[
+            ("1", "opaca"),
+            ("0.94", "suave"),
+            ("0.88", "media"),
+            ("0.8", "mucha"),
+        ],
+        por_defecto: "0.94",
+    },
+    Ajuste {
+        clave: "estela",
+        nombre: "Estela del cursor",
+        ayuda: "deja rastro al moverse",
+        valores: &[("si", "sí"), ("no", "no")],
+        por_defecto: "si",
+    },
+    Ajuste {
+        clave: "tranquilo",
+        nombre: "Modo tranquilo",
+        ayuda: "atenúa lo anterior al último mandato",
+        valores: &[("no", "no"), ("si", "sí")],
+        por_defecto: "no",
+    },
+];
 
 //  Los campos de un servidor, en el orden en que se rellenan. Los cinco
 //  primeros van a `~/.ssh/config` —los entiende ssh y los aprovechan scp, git
@@ -543,6 +597,7 @@ impl TerminalView {
             ultimo_tecleado: None,
             clave_pendiente: None,
             huella_desde: None,
+            ajustes: None,
             campana_hasta: None,
             bloques: Vec::new(),
             tranquilo: false,
@@ -609,6 +664,7 @@ impl TerminalView {
             ultimo_tecleado: None,
             clave_pendiente: None,
             huella_desde: None,
+            ajustes: None,
             campana_hasta: None,
             bloques: Vec::new(),
             tranquilo: false,
@@ -1003,6 +1059,21 @@ impl TerminalView {
     //  salir de la ventana, porque cuando estás trabajando en ella lo último
     //  que quieres es irte a mirar a otro sitio. La lista sale de los mismos
     //  ficheros: cada frontal la lee con sus ojos, pero la verdad es una.
+    //  Los ajustes de la terminal, en la terminal.
+    //
+    //  Estaban solo en la barra: quien use k4term sin ella no tenía dónde
+    //  cambiar el tamaño de letra ni el cristal salvo editando un fichero a
+    //  mano. Es el mismo fichero —lo escriben los dos, línea a línea— y el
+    //  cambio se ve al instante, que para eso la terminal ya lo vigilaba.
+    fn on_settings(&mut self, _: &Settings, _window: &mut Window, cx: &mut Context<Self>) {
+        self.ajustes = if self.ajustes.is_some() {
+            None
+        } else {
+            Some(0)
+        };
+        cx.notify();
+    }
+
     fn on_servers(&mut self, _: &Servers, _window: &mut Window, cx: &mut Context<Self>) {
         if self.servidores.is_some() {
             self.servidores = None;
@@ -1019,6 +1090,70 @@ impl TerminalView {
             editando: None,
         });
         cx.notify();
+    }
+
+    //  El panel de ajustes: mover con ↑↓, cambiar con ←→, y fuera con ESC.
+    //
+    //  Cambiar es elegir del corro de valores que tiene cada uno, no escribir
+    //  un número: son cuatro cosas con cuatro respuestas buenas, y así no hay
+    //  forma de dejar el fichero con algo que no vale.
+    fn tecla_de_ajustes(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
+        let Some(indice) = self.ajustes else {
+            return;
+        };
+        match keystroke.key.as_str() {
+            "escape" => {
+                self.ajustes = None;
+            }
+            "down" | "tab" | "j" => {
+                self.ajustes = Some((indice + 1).min(AJUSTES.len() - 1));
+            }
+            "up" | "k" => {
+                self.ajustes = Some(indice.saturating_sub(1));
+            }
+            "left" | "right" | "h" | "l" | "enter" | "space" => {
+                let adelante = matches!(keystroke.key.as_str(), "right" | "l" | "enter" | "space");
+                self.cambiar_ajuste(indice, adelante);
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn valor_de_ajuste(&self, indice: usize) -> String {
+        let ajuste = &AJUSTES[indice];
+        crate::gestor_ajustes()
+            .map(|g| (g.leer)())
+            .and_then(|puestos| {
+                puestos
+                    .iter()
+                    .find(|(c, _)| c == ajuste.clave)
+                    .map(|(_, v)| v.clone())
+            })
+            .unwrap_or_else(|| ajuste.por_defecto.to_string())
+    }
+
+    fn cambiar_ajuste(&mut self, indice: usize, adelante: bool) {
+        let ajuste = &AJUSTES[indice];
+        let Some(gestor) = crate::gestor_ajustes() else {
+            return;
+        };
+        let actual = self.valor_de_ajuste(indice);
+        //  Lo que hay puede no ser ninguno de los ofrecidos —el fichero se
+        //  edita a mano y ahí cabe cualquier cifra—, y entonces se empieza por
+        //  el principio en vez de no hacer nada.
+        let donde = ajuste
+            .valores
+            .iter()
+            .position(|(v, _)| *v == actual)
+            .unwrap_or(0);
+        let cuantos = ajuste.valores.len();
+        let siguiente = if adelante {
+            (donde + 1) % cuantos
+        } else {
+            (donde + cuantos - 1) % cuantos
+        };
+        (gestor.poner)(ajuste.clave, ajuste.valores[siguiente].0);
     }
 
     fn tecla_de_servidores(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
@@ -2280,6 +2415,10 @@ impl TerminalView {
         //  Con la búsqueda abierta, el teclado es suyo: lo que se escriba va
         //  al patrón y no a la shell, que si no se buscaría a ciegas mientras
         //  se le teclea a un programa por detrás.
+        if self.ajustes.is_some() {
+            self.tecla_de_ajustes(&keystroke, cx);
+            return;
+        }
         if self.servidores.is_some() {
             self.tecla_de_servidores(&keystroke, cx);
             return;
@@ -3740,6 +3879,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::on_send_session_to_note))
             .on_action(cx.listener(Self::on_to_island))
             .on_action(cx.listener(Self::on_servers))
+            .on_action(cx.listener(Self::on_settings))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -3776,7 +3916,10 @@ impl Render for TerminalView {
             //  El botón de ajustes: una rueda apagada en la esquina que solo
             //  se ve al acercar el ratón. Una terminal no debe tener cromo
             //  permanente, pero tampoco obligarte a saberte un fichero.
-            .children(crate::ajustes_disponibles().then(|| {
+            //  Y la rueda abre los de la terminal, siempre: antes solo salía
+            //  con la barra delante y llevaba a los ajustes de la casa, así
+            //  que sin barra no había rueda ni forma de tocar nada.
+            .child({
                 div()
                     .absolute()
                     .bottom_1()
@@ -3790,10 +3933,20 @@ impl Render for TerminalView {
                             .bg(hsla(0., 0., 1.0, 0.06))
                     })
                     .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, |_, _, _| crate::abrir_ajustes())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.ajustes = if this.ajustes.is_some() {
+                                None
+                            } else {
+                                Some(0)
+                            };
+                            cx.notify();
+                        }),
+                    )
                     //  La rueda dentada de la Nerd Font, la misma de la barra.
                     .child("\u{f0493}")
-            }))
+            })
             //  Un punto ámbar arriba a la derecha cuando el depósito de la
             //  barra está seco. Nada más: quien lo sepa, lo sabe.
             .children(self.seco.then(|| {
@@ -4195,6 +4348,116 @@ impl Render for TerminalView {
                         .text_color(hsla(0., 0., 0.35, 1.0))
                         .child("intro conecta · ctrl+S guarda o edita")
                         .child("ctrl+G agentes · ctrl+F favorito · supr borra"),
+                )
+            }))
+            //  ── los ajustes de la terminal ────────────────────────
+            .children(self.ajustes.map(|elegido| {
+                let apagado = hsla(0., 0., 0.55, 1.0);
+                let mut caja = div()
+                    .absolute()
+                    .top_8()
+                    .left_1_2()
+                    .w(px(460.))
+                    .ml(px(-230.))
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .gap_1()
+                    .p_2()
+                    .rounded(px(12.))
+                    .bg(hsla(0., 0., 0.11, 0.97))
+                    .border_1()
+                    .border_color(hsla(0., 0., 1.0, 0.08))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .px_1()
+                            .pb_1()
+                            .child(div().text_color(gpui::white()).child("ajustes"))
+                            .child(div().text_color(apagado).child("de esta terminal")),
+                    );
+
+                for (i, ajuste) in AJUSTES.iter().enumerate() {
+                    let esta = i == elegido;
+                    let valor = self.valor_de_ajuste(i);
+                    //  Lo que se enseña es el nombre bonito del valor; si el
+                    //  fichero trae algo de su cosecha, se enseña tal cual en
+                    //  vez de mentir con el primero de la lista.
+                    let como_se_lee = ajuste
+                        .valores
+                        .iter()
+                        .find(|(v, _)| *v == valor)
+                        .map(|(_, n)| n.to_string())
+                        .unwrap_or(valor);
+                    caja = caja.child(
+                        div()
+                            .flex()
+                            .w_full()
+                            .overflow_hidden()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(8.))
+                            .when(esta, |d| d.bg(hsla(0., 0., 0.20, 1.0)))
+                            .child(
+                                div()
+                                    .w(px(150.))
+                                    .flex_none()
+                                    .truncate()
+                                    .text_color(if esta { gpui::white() } else { apagado })
+                                    .child(ajuste.nombre),
+                            )
+                            .child(
+                                div()
+                                    .w(px(80.))
+                                    .flex_none()
+                                    .truncate()
+                                    .text_color(hsla(0.38, 0.72, 0.6, 1.0))
+                                    .child(como_se_lee),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_color(hsla(0., 0., 0.35, 1.0))
+                                    .child(ajuste.ayuda),
+                            ),
+                    );
+                }
+
+                //  Y si hay barra, el camino a SUS ajustes: los de la casa
+                //  son otra cosa —el tema, la isla, los plugins— y quien la
+                //  tenga los busca aquí. Sin barra, esta fila no existe.
+                if crate::ajustes_disponibles() {
+                    caja = caja.child(
+                        div()
+                            .flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .mt_1()
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(hsla(0., 0., 0.16, 1.0)))
+                            .on_mouse_down(MouseButton::Left, |_, _, _| crate::abrir_ajustes())
+                            .text_color(apagado)
+                            .child("los ajustes de k4 —el tema, la isla, los plugins—"),
+                    );
+                }
+
+                caja.child(
+                    div()
+                        .px_2()
+                        .pt_1()
+                        .flex()
+                        .flex_col()
+                        .text_color(hsla(0., 0., 0.35, 1.0))
+                        .child("↑↓ elige · ←→ cambia · esc cierra")
+                        .child("se guarda solo en ~/.config/k4term/k4term.conf"),
                 )
             }))
             .children(self.busqueda.as_ref().map(|b| {

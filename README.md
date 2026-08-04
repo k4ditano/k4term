@@ -150,6 +150,22 @@ This implementation includes common terminal behaviors needed by modern TUIs:
 
 The examples set `TERM=xterm-256color` and `COLORTERM=truecolor` to help apps enable richer output.
 
+## Settings
+
+`ctrl+,` — or the little gear in the corner — opens k4term's own settings:
+font size, glass, cursor trail and quiet mode. Pick with `↑↓`, change with
+`←→`, `esc` closes.
+
+They are written to `~/.config/k4term/k4term.conf`, line by line, leaving your
+comments and any keys not offered here untouched — that file stays the source
+of truth and can still be edited by hand (font family, padding, shell, corner
+radius). The window watches it, so a change shows up immediately in every open
+window, no restart.
+
+k4's bar writes the same file from its own Settings panel; the two coexist on
+purpose. But k4term no longer *needs* the bar to be configurable: that was the
+gap — with the terminal alone, the gear opened a panel that was not there.
+
 ## Saved servers and passwords
 
 `ctrl+shift+S` opens the server list, read from `~/.ssh/config` (plus k4's own

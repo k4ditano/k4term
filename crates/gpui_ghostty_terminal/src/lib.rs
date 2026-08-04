@@ -86,6 +86,9 @@ type MiraTexto = dyn Fn(&str) -> bool + Send + Sync;
 //  correr para terminar el trabajo —mandar la clave, o quitarla de allí—,
 //  porque eso pide tu contraseña y lo tienes que ver tú.
 type PuertaAgentes = dyn Fn(&Servidor, bool) -> String + Send + Sync;
+//  Guardar un ajuste. Lo hace el anfitrión porque es quien sabe dónde vive el
+//  fichero y cómo se escribe sin pisar lo que haya puesto a mano.
+type PonerAjuste = dyn Fn(&str, &str) + Send + Sync;
 
 pub struct GestorServidores {
     pub listar: Box<Listar>,
@@ -110,6 +113,28 @@ pub struct GestorServidores {
     //  máquina. Por lo mismo: la vista lee, el anfitrión sabe.
     pub pregunta_huella: Box<MiraTexto>,
     pub agentes: Box<PuertaAgentes>,
+}
+
+//  ── los ajustes de la terminal, dentro de la terminal ─────────────
+//
+//  Estaban solo en la barra, y eso deja fuera a quien use k4term sin ella:
+//  sus propios ajustes no se podían tocar desde la propia aplicación. Aquí se
+//  ofrece el panel; el fichero lo escribe el anfitrión y el cambio vuelve por
+//  donde ya volvía —el vigía del fichero—, así que se ve al instante y sin un
+//  camino nuevo que mantener.
+pub struct GestorAjustes {
+    pub poner: Box<PonerAjuste>,
+    pub leer: Box<dyn Fn() -> Vec<(String, String)> + Send + Sync>,
+}
+
+static AJUSTES_PROPIOS: std::sync::OnceLock<GestorAjustes> = std::sync::OnceLock::new();
+
+pub fn registrar_ajustes_propios(gestor: GestorAjustes) {
+    let _ = AJUSTES_PROPIOS.set(gestor);
+}
+
+pub(crate) fn gestor_ajustes() -> Option<&'static GestorAjustes> {
+    AJUSTES_PROPIOS.get()
 }
 
 static GESTOR: std::sync::OnceLock<GestorServidores> = std::sync::OnceLock::new();

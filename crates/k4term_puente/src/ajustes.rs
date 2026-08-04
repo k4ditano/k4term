@@ -64,6 +64,44 @@ pub fn ruta_por_defecto() -> PathBuf {
     PathBuf::from(base).join("k4term/k4term.conf")
 }
 
+//  Cambiar UNA clave, dejando el resto del fichero como estaba.
+//
+//  Línea a línea y no reescribiendo el fichero entero a propósito: quien lo
+//  haya editado a mano tiene derecho a que no se le borren sus comentarios ni
+//  las claves que aquí todavía no se ofrecen. Es lo mismo que hace la barra
+//  desde su panel de ajustes, y por eso los dos pueden escribirlo sin pelearse.
+pub fn poner(clave: &str, valor: &str) -> std::io::Result<()> {
+    let ruta = ruta_por_defecto();
+    if let Some(padre) = ruta.parent() {
+        std::fs::create_dir_all(padre)?;
+    }
+    let anterior = std::fs::read_to_string(&ruta).unwrap_or_default();
+
+    let mut salida = String::new();
+    let mut puesta = false;
+    for linea in anterior.lines() {
+        //  Se compara con la clave de la línea, no con el texto entero: así
+        //  «tamano = 13» y «tamano=13» son la misma, y un comentario que
+        //  mencione la clave no se toca.
+        let sin_comentario = linea.split('#').next().unwrap_or("");
+        let es_suya = sin_comentario
+            .split_once('=')
+            .map(|(k, _)| k.trim() == clave)
+            .unwrap_or(false);
+        if es_suya && !puesta {
+            salida.push_str(&format!("{clave} = {valor}\n"));
+            puesta = true;
+        } else {
+            salida.push_str(linea);
+            salida.push('\n');
+        }
+    }
+    if !puesta {
+        salida.push_str(&format!("{clave} = {valor}\n"));
+    }
+    std::fs::write(&ruta, salida)
+}
+
 //  Los ajustes, seguidos en caliente. Se vigila la carpeta y no el fichero
 //  por lo de siempre: quien lo escribe lo reemplaza entero y un vigía clavado
 //  al inodo viejo se queda mirando un fichero que ya no es.
