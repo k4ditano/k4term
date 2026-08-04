@@ -110,6 +110,18 @@ pub fn es_peticion_de_clave(texto: &str) -> bool {
     t.contains("assword:") || t.contains("contrasena:") || t.contains("contraseña:")
 }
 
+//  ¿Y es la pregunta de la huella? La de «¿seguro que quieres seguir?» que sale
+//  la primera vez que entras a una máquina.
+//
+//  Para los servidores guardados esto no debería saltar nunca —su bloque lleva
+//  `StrictHostKeyChecking accept-new` y ssh no pregunta—, pero sigue haciendo
+//  falta: los destinos escritos al vuelo no tienen bloque, y los guardados de
+//  antes de esto tampoco.
+pub fn es_pregunta_de_huella(texto: &str) -> bool {
+    let t = texto.to_lowercase();
+    t.contains("(yes/no") && t.contains('?')
+}
+
 pub fn ruta_claves() -> PathBuf {
     casa().join(".config/k4term/claves.json")
 }
@@ -362,6 +374,11 @@ pub fn guardar(servidor: &Servidor) -> Result<(), String> {
 pub fn bloque_ssh(servidor: &Servidor) -> String {
     let mut texto = format!("\nHost {}\n", servidor.alias);
     texto.push_str(&format!("    HostName {}\n", servidor.host));
+    //  La huella de una máquina nueva se acepta sola; la que CAMBIA sigue
+    //  parando la conexión, que es el caso que importa. Va en el bloque y no
+    //  en la orden para que lo que se teclea siga siendo `ssh nombre`: ver
+    //  pasar una línea de opciones es justo lo que no se quiere ver.
+    texto.push_str("    StrictHostKeyChecking accept-new\n");
     for (clave, valor) in [
         ("User", &servidor.usuario),
         ("Port", &servidor.puerto),
@@ -642,11 +659,24 @@ Host trabajo   trabajo.corto
             ..Default::default()
         });
         assert!(bloque.contains("HostName 192.168.1.10"));
+        //  Y la huella de una máquina nueva se acepta sola: así no sale la
+        //  pregunta y no hay que contestarla a la vista de nadie.
+        assert!(bloque.contains("StrictHostKeyChecking accept-new"));
         assert!(bloque.contains("User abel"));
         assert!(
             !bloque.contains("secreta123"),
             "la contraseña se ha escrito en el ssh_config"
         );
+    }
+
+    #[test]
+    fn reconoce_la_pregunta_de_la_huella() {
+        assert!(es_pregunta_de_huella(
+            "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+        ));
+        //  Y no cualquier cosa con un «?» dentro.
+        assert!(!es_pregunta_de_huella("¿seguro? escribe algo"));
+        assert!(!es_pregunta_de_huella("yes/no"));
     }
 
     #[test]

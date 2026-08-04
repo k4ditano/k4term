@@ -263,6 +263,7 @@ fn main() {
             desconectado: Box::new(|| barra::desconectado(std::process::id())),
             color: Box::new(servidores::color_del_tinte),
             pide_clave: Box::new(servidores::es_peticion_de_clave),
+            pregunta_huella: Box::new(servidores::es_pregunta_de_huella),
         });
 
         //  El botón de ajustes solo existe si hay barra que los enseñe.

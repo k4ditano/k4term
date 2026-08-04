@@ -98,6 +98,9 @@ pub struct GestorServidores {
     //  vista lee el PTY, pero qué cuenta como «password:» es cosa de quien
     //  guarda las contraseñas, y la isla usa la misma lista.
     pub pide_clave: Box<MiraTexto>,
+    //  Y si es la pregunta de la huella, la de la primera vez que entras a una
+    //  máquina. Por lo mismo: la vista lee, el anfitrión sabe.
+    pub pregunta_huella: Box<MiraTexto>,
 }
 
 static GESTOR: std::sync::OnceLock<GestorServidores> = std::sync::OnceLock::new();
