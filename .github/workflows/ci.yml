@@ -29,28 +29,21 @@ jobs:
       - name: Rustfmt
         run: cargo fmt --all -- --check
 
-  vt-linux:
-    name: vt (linux)
+  #  Todo en linux, y el workspace entero.
+  #
+  #  Antes esto eran dos: uno de ubuntu que solo probaba el VT y otro de macOS
+  #  con el clippy y las pruebas de la terminal. El de macOS no pasó NUNCA —
+  #  treinta ejecuciones, cero verdes—: el build de Zig de `ghostty_vt_sys` no
+  #  enlaza allí y se cae con media libc sin resolver (`_getenv`, `_isatty`,
+  #  `_sigaction`…). Una CI que siempre está roja no avisa de nada, y encima
+  #  vigilaba una plataforma que esta terminal no usa: k4term es para Hyprland.
+  #
+  #  Y ya que se corre donde se compila de verdad, se corre TODO: los binarios
+  #  (`k4term`, `k4term-isla`), el puente y los ejemplos entraban en el
+  #  workspace y no los miraba nadie.
+  terminal:
+    name: terminal (linux)
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.14.1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-      - name: Test (VT only)
-        run: cargo test -p ghostty_vt -p ghostty_vt_sys
-
-  terminal-macos:
-    name: terminal (macos)
-    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -60,6 +53,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      #  Lo que le hace falta a gpui para enlazar aquí. La lista no es de
+      #  catálogo: sale de mirar contra qué enlaza el binario ya construido
+      #  (`ldd` da xkbcommon, xkbcommon-x11 y los xcb) y qué pide pkg-config
+      #  durante el build (freetype, por `freetype-sys`). Wayland y fontconfig
+      #  van porque son los respaldos de gpui en linux y cuestan segundos.
+      - name: Dependencias de gpui
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-x11-dev libwayland-dev \
+            libfontconfig-dev libfreetype-dev
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
         with:
@@ -67,6 +71,9 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
       - name: Clippy
-        run: cargo clippy -p ghostty_vt -p ghostty_vt_sys -p gpui_ghostty_terminal --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      #  En debug a propósito: el módulo de pruebas va con `#[cfg(test)]` y en
+      #  release no entra. `cargo test --release` decía «0 tests» y pasaba en
+      #  verde sin haber corrido ninguna.
       - name: Test
-        run: cargo test -p ghostty_vt -p ghostty_vt_sys -p gpui_ghostty_terminal
+        run: cargo test --workspace
