@@ -1,5 +1,7 @@
 # k4term
 
+[![Follow @k4ditano on X](https://img.shields.io/badge/follow-%40k4ditano-000000?style=flat&logo=x&logoColor=white)](https://x.com/k4ditano)
+
 A terminal emulator built on Ghostty's VT core and Zed's GPUI, and the house
 terminal of the [k4 bar](https://github.com/k4ditano/k4) — though it does not
 need it: without a bar in front, the bridge stays quiet and you get a plain,
